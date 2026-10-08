@@ -96,6 +96,8 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
   async function inviteGuest(org, meeting, user, role, { email, name }, ip) {
     if (!isOpen(meeting)) throw appError('expired', 'Meeting ended');
     if (!(await canManage(meeting, user, role))) throw appError('forbidden', 'Only the host can invite');
+    // (An external collaborator may host a call, but never bring guests.)
+    if (role === 'external') throw appError('forbidden', 'External collaborators cannot invite');
     const policy = await policies.get(org.id);
     const clean = canonicalEmail(email);
     if (!isEmail(clean)) throw appError('invalid', 'Invalid e-mail', { field: 'email' });
@@ -107,6 +109,7 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
 
   async function inviteMembers(org, meeting, user, role, userIds, ip) {
     if (!(await canManage(meeting, user, role))) throw appError('forbidden', 'Only the host can invite');
+    if (role === 'external') throw appError('forbidden', 'External collaborators cannot invite');
     const ids = [...new Set(userIds)].slice(0, 200);
     const valid = ids.length
       ? await db.all(`SELECT user_id FROM memberships WHERE org_id = ? AND status = 'active' AND user_id IN (${ids.map(() => '?').join(',')})`, [org.id, ...ids])

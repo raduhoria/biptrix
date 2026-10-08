@@ -4,12 +4,13 @@ import { appError, canonicalEmail, isEmail, isoIn, newId, newToken, nowIso, sha2
 // every request; the UI only hides what the server would refuse anyway.
 export const ORG_ROLES = ['owner', 'admin', 'compliance', 'member', 'external'];
 const PERMISSIONS = {
-  owner: ['chat', 'directory', 'spaces.browse', 'meetings.create', 'org.manage', 'members.manage', 'spaces.manage', 'policies.manage', 'audit.read'],
-  admin: ['chat', 'directory', 'spaces.browse', 'meetings.create', 'members.manage', 'spaces.manage', 'policies.manage', 'audit.read'],
-  compliance: ['chat', 'directory', 'spaces.browse', 'meetings.create', 'audit.read'],
-  member: ['chat', 'directory', 'spaces.browse', 'meetings.create'],
-  // External collaborators only see what was shared with them explicitly.
-  external: ['chat'],
+  owner: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create', 'org.manage', 'members.manage', 'spaces.manage', 'policies.manage', 'audit.read'],
+  admin: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create', 'members.manage', 'spaces.manage', 'policies.manage', 'audit.read'],
+  compliance: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create', 'audit.read'],
+  member: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create'],
+  // External collaborators only see what was shared with them explicitly;
+  // they can call within those conversations (no meetings, no guests).
+  external: ['chat', 'calls'],
 };
 export const can = (role, permission) => !!PERMISSIONS[role]?.includes(permission);
 export const isAdminRole = (role) => role === 'owner' || role === 'admin' || role === 'compliance';

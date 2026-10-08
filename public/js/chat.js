@@ -382,7 +382,7 @@ function renderHeader() {
     `<li><button class="dropdown-item" data-action="search-here">${icon('search')} ${esc(t('searchHere'))}</button></li>`,
     c.type !== 'dm' ? `<li><hr class="dropdown-divider"></li><li><button class="dropdown-item text-danger" data-action="leave">${icon('door')} ${esc(t('leave'))}</button></li>` : '',
   ].join('');
-  for (const btn of $$('[data-action="call"]')) btn.hidden = !boot.perms.meetings;
+  for (const btn of $$('[data-action="call"]')) btn.hidden = !boot.perms.calls;
 }
 
 const SAME_AUTHOR_MS = 5 * 60_000;
@@ -459,8 +459,8 @@ function missedCallHtml(m) {
     const c = state.conversations.get(m.conversation_id);
     return `<div class="msg-call">${icon('phone-off')} ${esc(t(c?.type === 'dm' ? 'callNoAnswer' : 'callNobodyAnswered'))}</div>`;
   }
-  return `<div class="msg-call">${icon('phone-off')} ${esc(t('callMissedFrom', { name: person(m.author_id).name }))}
-    <button class="btn btn-sm btn-link p-0" data-action="call" data-kind="${kind}">${esc(t('callBack'))}</button></div>`;
+  const back = boot.perms.calls ? ` <button class="btn btn-sm btn-link p-0" data-action="call" data-kind="${kind}">${esc(t('callBack'))}</button>` : '';
+  return `<div class="msg-call">${icon('phone-off')} ${esc(t('callMissedFrom', { name: person(m.author_id).name }))}${back}</div>`;
 }
 
 // How an ended call reads, from where the viewer stood (caller or called).
@@ -1295,7 +1295,7 @@ function showProfile(anchor, id) {
       others
         ? `<div class="d-flex gap-2 mt-3">
       <button class="btn btn-primary btn-sm flex-grow-1" data-profile="dm">${icon('chat')} ${esc(t('message'))}</button>
-      ${boot.perms.meetings ? `<button class="btn btn-outline-secondary btn-sm" data-profile="audio" title="${esc(t('startAudioCall'))}">${icon('phone')}</button>
+      ${boot.perms.calls ? `<button class="btn btn-outline-secondary btn-sm" data-profile="audio" title="${esc(t('startAudioCall'))}">${icon('phone')}</button>
       <button class="btn btn-outline-secondary btn-sm" data-profile="video" title="${esc(t('startCall'))}">${icon('video')}</button>` : ''}
     </div>`
         : ''
