@@ -521,6 +521,9 @@ export default {
       internal: 'Eroare neașteptată.',
     },
     meet: {
+      settings: 'Setări',
+      speaker: 'Difuzor',
+      settingsHint: 'Schimbările se aplică imediat, fără să ieși din apel.',
       chat: 'Chat',
       chatNone: 'Chat-ul acestui apel este conversația lui, disponibilă doar membrilor ei.',
       chatPlaceholder: 'Scrie tuturor din apel',

@@ -520,6 +520,9 @@ export default {
       internal: 'Algo salió mal.',
     },
     meet: {
+      settings: 'Ajustes',
+      speaker: 'Altavoz',
+      settingsHint: 'Los cambios se aplican al instante, sin salir de la llamada.',
       chat: 'Chat',
       chatNone: 'El chat de esta llamada es su conversación, disponible solo para sus miembros.',
       chatPlaceholder: 'Escribe a todos en la llamada',

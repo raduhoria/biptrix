@@ -34,7 +34,7 @@ const state = {
   local: { audio: null, video: null, screen: null },
   mic: localStorage.getItem('meet.mic') !== '0',
   cam: localStorage.getItem('meet.cam') !== '0',
-  devices: { mic: localStorage.getItem('meet.micId') || '', cam: localStorage.getItem('meet.camId') || '' },
+  devices: { mic: localStorage.getItem('meet.micId') || '', cam: localStorage.getItem('meet.camId') || '', spk: localStorage.getItem('meet.spkId') || '' },
   joined: false,
   leaving: false,
   spotlight: true,
@@ -103,8 +103,69 @@ async function listDevices() {
     const list = devices.filter((d) => d.kind === kind);
     sel.innerHTML = list.map((d, i) => `<option value="${esc(d.deviceId)}"${d.deviceId === current ? ' selected' : ''}>${esc(d.label || `${kind} ${i + 1}`)}</option>`).join('') || `<option>—</option>`;
   };
-  fill($('#sel-mic'), 'audioinput', state.local.audio?.getSettings().deviceId || state.devices.mic);
-  fill($('#sel-cam'), 'videoinput', state.local.video?.getSettings().deviceId || state.devices.cam);
+  // The same choices before joining and in the call's settings tab.
+  for (const sel of $$('[data-device="mic"]')) fill(sel, 'audioinput', state.local.audio?.getSettings().deviceId || state.devices.mic);
+  for (const sel of $$('[data-device="cam"]')) fill(sel, 'videoinput', state.local.video?.getSettings().deviceId || state.devices.cam);
+  // Speaker choice: only where the browser can route audio (not Safari/iOS).
+  const outputs = devices.filter((d) => d.kind === 'audiooutput');
+  $('#set-spk-box').hidden = !canPickSpeaker || !outputs.length;
+  if (canPickSpeaker) fill($('#set-spk'), 'audiooutput', state.devices.spk || 'default');
+}
+
+const canPickSpeaker = 'setSinkId' in HTMLMediaElement.prototype;
+
+// Remote audio plays through the tiles' video elements.
+function applySpeaker(el = null) {
+  if (!canPickSpeaker || !state.devices.spk) return;
+  for (const video of el ? [el] : $$('#tiles .tile:not(.self-tile) video')) video.setSinkId(state.devices.spk).catch(() => {});
+}
+
+// Switching a device during the call replaces the track on the existing
+// connections (no renegotiation, nobody notices but the sound/picture).
+async function changeDevice(kind, id) {
+  state.devices[kind] = id;
+  localStorage.setItem(`meet.${kind}Id`, id);
+  if (kind === 'spk') return applySpeaker();
+  if (kind === 'mic') {
+    stopTrack('audio');
+    await startMic();
+    pushTrack(SLOT.audio);
+    announceMedia();
+  } else if (state.cam) {
+    stopTrack('video');
+    await startCamera();
+    pushTrack(SLOT.camera);
+    announceMedia();
+  }
+  renderPreview();
+  renderLocalTile();
+  await listDevices().catch(() => {});
+}
+
+// Microphone level in the settings tab, so a choice can be checked.
+let meter = null;
+function runMeter() {
+  const on = !$('#meet-panel').hidden && $('#meet-panel').dataset.tab === 'settings' && state.local.audio && state.mic;
+  if (!on) {
+    $('#mic-level').style.width = '0';
+    meter = null;
+    return;
+  }
+  try {
+    if (meter?.trackId !== state.local.audio.id) {
+      state.audioCtx ||= new AudioContext();
+      const analyser = state.audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      state.audioCtx.createMediaStreamSource(new MediaStream([state.local.audio])).connect(analyser);
+      meter = { trackId: state.local.audio.id, analyser, buf: new Uint8Array(analyser.frequencyBinCount) };
+    }
+    meter.analyser.getByteFrequencyData(meter.buf);
+    const level = meter.buf.reduce((a, b) => a + b, 0) / meter.buf.length;
+    $('#mic-level').style.width = `${Math.min(100, level * 2)}%`;
+  } catch {
+    return;
+  }
+  setTimeout(runMeter, 120);
 }
 
 function renderPreview() {
@@ -350,6 +411,10 @@ function showPanel(tab, toggle = true) {
   const panel = $('#meet-panel');
   panel.hidden = toggle && !panel.hidden && panel.dataset.tab === tab;
   panel.dataset.tab = tab;
+  if (!panel.hidden && tab === 'settings') {
+    listDevices().catch(() => {});
+    if (!meter) runMeter();
+  }
   if (!panel.hidden && tab === 'chat') {
     state.chat.unread = 0;
     renderChatBadge();
@@ -669,6 +734,7 @@ function createTile(peer) {
   peer.tile = tileShell(peer.info.id, peer.info.name + (peer.info.guest ? ` (${t('meet.guest')})` : ''), 'connecting');
   const video = $('video', peer.tile);
   video.srcObject = peer.stream;
+  applySpeaker(video);
   renderTile(peer);
 }
 
@@ -886,6 +952,8 @@ root.addEventListener('click', async (e) => {
       return showPanel('people');
     case 'chat':
       return showPanel('chat');
+    case 'settings':
+      return showPanel('settings');
     case 'tab':
       return showPanel(btn.dataset.tab, false);
     case 'close-panel':
@@ -936,26 +1004,9 @@ $('#invite-form')?.addEventListener('submit', async (e) => {
   }
 });
 
-for (const [sel, kind] of [
-  ['#sel-mic', 'mic'],
-  ['#sel-cam', 'cam'],
-]) {
-  $(sel).addEventListener('change', async (e) => {
-    state.devices[kind] = e.target.value;
-    localStorage.setItem(`meet.${kind}Id`, e.target.value);
-    if (kind === 'mic') {
-      stopTrack('audio');
-      await startMic();
-      pushTrack(SLOT.audio);
-    } else if (state.cam) {
-      stopTrack('video');
-      await startCamera();
-      pushTrack(SLOT.camera);
-    }
-    renderPreview();
-    renderLocalTile();
-  });
-}
+for (const sel of $$('[data-device]')) sel.addEventListener('change', (e) => changeDevice(e.target.dataset.device, e.target.value));
+// A headset plugged in or removed mid-call shows up in the lists.
+navigator.mediaDevices?.addEventListener?.('devicechange', () => listDevices().catch(() => {}));
 
 window.addEventListener('beforeunload', () => {
   state.leaving = true;

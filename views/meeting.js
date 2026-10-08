@@ -50,8 +50,8 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
         <h1 class="h5 mb-3">${e('client.meet.ready')}</h1>
         ${mode === 'guest' ? `<div class="mb-3"><label class="form-label" for="guest-name">${e('client.meet.yourName')}</label><input class="form-control" id="guest-name" maxlength="60" value="${escapeHtml(displayName)}"></div>` : ''}
         <div class="row g-2 mb-3">
-          <div class="col-sm-6"><label class="form-label small" for="sel-mic">${e('client.meet.microphone')}</label><select class="form-select form-select-sm" id="sel-mic"></select></div>
-          <div class="col-sm-6"><label class="form-label small" for="sel-cam">${e('client.meet.camera')}</label><select class="form-select form-select-sm" id="sel-cam"></select></div>
+          <div class="col-sm-6"><label class="form-label small" for="sel-mic">${e('client.meet.microphone')}</label><select class="form-select form-select-sm" id="sel-mic" data-device="mic"></select></div>
+          <div class="col-sm-6"><label class="form-label small" for="sel-cam">${e('client.meet.camera')}</label><select class="form-select form-select-sm" id="sel-cam" data-device="cam"></select></div>
         </div>
         <div class="alert alert-warning small py-2" id="media-error" hidden></div>
         <button class="btn btn-primary btn-lg w-100" data-action="join">${e('client.meet.join')}</button>
@@ -85,6 +85,7 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
       <header class="d-flex align-items-center gap-1 mb-2">
         <button class="btn btn-sm meet-tab" data-action="tab" data-tab="people">${e('client.meet.people')}</button>
         <button class="btn btn-sm meet-tab" data-action="tab" data-tab="chat">${e('client.meet.chat')}</button>
+        <button class="btn btn-sm meet-tab" data-action="tab" data-tab="settings">${e('client.meet.settings')}</button>
         <button class="btn btn-sm btn-icon ms-auto text-white" data-action="close-panel" aria-label="${e('common.close')}">${icon('x')}</button>
       </header>
       <div class="meet-chat" id="meet-chat">
@@ -94,6 +95,18 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
           <textarea class="form-control form-control-sm" name="body" rows="1" maxlength="2000" placeholder="${e('client.meet.chatPlaceholder')}"></textarea>
           <button class="btn btn-sm btn-primary" aria-label="${e('client.meet.chatSend')}">${icon('send')}</button>
         </form>
+      </div>
+      <div class="meet-settings">
+        <label class="form-label small" for="set-mic">${e('client.meet.microphone')}</label>
+        <select class="form-select form-select-sm mb-1" id="set-mic" data-device="mic"></select>
+        <div class="mic-meter mb-3"><span id="mic-level"></span></div>
+        <label class="form-label small" for="set-cam">${e('client.meet.camera')}</label>
+        <select class="form-select form-select-sm mb-3" id="set-cam" data-device="cam"></select>
+        <div id="set-spk-box">
+          <label class="form-label small" for="set-spk">${e('client.meet.speaker')}</label>
+          <select class="form-select form-select-sm mb-3" id="set-spk" data-device="spk"></select>
+        </div>
+        <p class="small opacity-75 mb-0">${e('client.meet.settingsHint')}</p>
       </div>
       <div class="meet-people">
       <div id="lobby-box" hidden>
@@ -119,6 +132,7 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
     ${ctrl('screen', 'screen', 'client.meet.share', 'id="btn-screen"')}
     ${ctrl('panel', 'users', 'client.meet.people')}<span class="badge rounded-pill text-bg-warning lobby-badge" id="lobby-badge" hidden></span>
     ${ctrl('chat', 'chat', 'client.meet.chat', 'id="btn-chat"')}<span class="badge rounded-pill text-bg-primary lobby-badge" id="chat-badge" hidden></span>
+    ${ctrl('settings', 'settings', 'client.meet.settings')}
     ${ctrl('copy-link', 'link', 'client.meet.copyLink')}
     <button class="btn ctrl ctrl-leave" data-action="leave" title="${e('client.meet.leave')}">${icon('phone-off')}</button>
     <button class="btn btn-sm btn-danger ms-2" data-action="end" id="btn-end" hidden>${e('client.meet.endAll')}</button>
