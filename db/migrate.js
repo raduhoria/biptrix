@@ -1,0 +1,19 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+
+// Versioned changes after the first release. schema.sql only creates what is
+// missing; anything that alters an existing table goes here with the next
+// version number and is applied exactly once (recorded in schema_migrations).
+const MIGRATIONS = [
+  // [2, ['ALTER TABLE users ADD COLUMN avatar_key TEXT']],
+];
+
+export async function runMigrations(db) {
+  await db.exec(readFileSync(path.join(import.meta.dirname, 'schema.sql'), 'utf8'));
+  const done = new Set((await db.all('SELECT version FROM schema_migrations')).map((r) => r.version));
+  if (!done.has(1)) await db.run('INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)', [new Date().toISOString()]);
+  for (const [version, statements] of MIGRATIONS) {
+    if (done.has(version)) continue;
+    await db.batch([...statements.map((sql) => [sql, []]), ['INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)', [version, new Date().toISOString()]]]);
+  }
+}

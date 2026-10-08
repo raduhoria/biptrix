@@ -1,0 +1,18 @@
+{
+  "name": "biptrix",
+  "version": "0.1.0",
+  "description": "Multi-tenant chat and meetings platform (DM, groups, Spaces, WebRTC meetings with external guests)",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 tests/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
+  }
+}
