@@ -374,6 +374,9 @@ function renderHeader() {
   }
   const canEdit = c.type === 'group' || (c.type === 'space' && (c.my_role === 'moderator' || ['owner', 'admin'].includes(boot.role)));
   $('#conv-menu').innerHTML = [
+    // On phones, pinned and members live here (the header keeps the calls).
+    `<li class="d-sm-none"><button class="dropdown-item" data-action="pinned">${icon('pin')} ${esc(t('pinned'))}</button></li>`,
+    `<li class="d-sm-none"><button class="dropdown-item" data-action="members">${icon('users')} ${esc(t('members'))}</button></li>`,
     `<li><button class="dropdown-item" data-action="mute">${icon(c.muted ? 'bell' : 'bell-off')} ${esc(t(c.muted ? 'unmute' : 'mute'))}</button></li>`,
     canEdit ? `<li><button class="dropdown-item" data-action="rename">${icon('edit')} ${esc(t('rename'))}</button></li>` : '',
     `<li><button class="dropdown-item" data-action="search-here">${icon('search')} ${esc(t('searchHere'))}</button></li>`,
