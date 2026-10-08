@@ -1,4 +1,5 @@
-// Romanian UI strings (default language). Keep keys in sync with en.js.
+// Romanian UI strings. Keep keys in sync with en.js (the default language and
+// the fallback for missing keys).
 // The `client` subtree is sent to the browser modules (public/js).
 export default {
   app: {
@@ -303,7 +304,7 @@ export default {
     codeIgnore: 'Dacă nu ai cerut tu acest cod, ignoră mesajul: contul tău rămâne în siguranță.',
     mentionLead: 'Ai un mesaj nou în {conversation} ({org}):',
     orgInviteTitle: 'Invitație în {org}',
-    orgInviteIntro: '{inviter} te-a invitat să te alături organizației {org} pe Biptrix.',
+    orgInviteIntro: '{inviter} te-a invitat să te alături organizației {org} pe {brand}.',
     orgInviteButton: 'Acceptă invitația',
     expires7: 'Linkul este valabil 7 zile.',
     meetingInviteTitle: 'Invitație: {title}',

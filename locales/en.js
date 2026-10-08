@@ -1,5 +1,5 @@
-// English UI strings. Keep keys in sync with ro.js (a missing key falls back
-// to Romanian).
+// English UI strings: the default language and the fallback for ro.js and
+// es.js. Keep the three files' keys in sync.
 export default {
   app: {
     name: 'BipTrix',
@@ -303,7 +303,7 @@ export default {
     codeIgnore: 'If you did not ask for this code, ignore this message: your account stays safe.',
     mentionLead: 'You have a new message in {conversation} ({org}):',
     orgInviteTitle: 'Invitation to {org}',
-    orgInviteIntro: '{inviter} invited you to join {org} on Biptrix.',
+    orgInviteIntro: '{inviter} invited you to join {org} on {brand}.',
     orgInviteButton: 'Accept invitation',
     expires7: 'The link is valid for 7 days.',
     meetingInviteTitle: 'Invitation: {title}',

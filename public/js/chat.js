@@ -14,9 +14,10 @@ const ME = boot.me.id;
 const ORG = boot.org;
 const API = `/api/o/${ORG.slug}`;
 const OUTBOX_KEY = `outbox:${ORG.id}:${ME}`;
-const dateFmt = new Intl.DateTimeFormat(boot.locale === 'ro' ? 'ro-RO' : 'en-GB', { dateStyle: 'full' });
-const timeFmt = new Intl.DateTimeFormat(boot.locale === 'ro' ? 'ro-RO' : 'en-GB', { timeStyle: 'short' });
-const shortFmt = new Intl.DateTimeFormat(boot.locale === 'ro' ? 'ro-RO' : 'en-GB', { day: 'numeric', month: 'short' });
+const INTL = { en: 'en-GB', ro: 'ro-RO', es: 'es-ES' }[boot.locale] || 'en-GB';
+const dateFmt = new Intl.DateTimeFormat(INTL, { dateStyle: 'full' });
+const timeFmt = new Intl.DateTimeFormat(INTL, { timeStyle: 'short' });
+const shortFmt = new Intl.DateTimeFormat(INTL, { day: 'numeric', month: 'short' });
 
 const state = {
   cursor: 0,
