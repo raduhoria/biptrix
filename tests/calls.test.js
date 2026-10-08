@@ -215,4 +215,24 @@ describe('in-call chat and calls', () => {
     a.ws.ws.close();
     bobWs.ws.close();
   });
+  test('an external collaborator can call within their conversations, nothing more', async () => {
+    const space = (await anaClient.post(`${API()}/spaces`, { json: { name: 'Cu partener' } })).data.conversation;
+    await anaClient.post(`${API()}/conversations/${space.id}/invite`, { json: { email: 'ext@partner.com' } });
+    const token = app.mailer.sent.filter((m) => m.to === 'ext@partner.com').at(-1).text.match(/\/invite\/([A-Za-z0-9_-]+)/)[1];
+    const ext = client(app.base);
+    await ext.post(`/invite/${token}`, { form: { name: 'Ext', password: 'Parola12345' } });
+    const extDm = (await ext.post(`${API()}/dms`, { json: { user_id: ana.id } })).data.conversation;
+    const anaWs = await chatSocket(anaClient);
+    const call = await ext.post(`${API()}/meetings`, { json: { conversation_id: extDm.id, call: 'audio', guests: [{ email: 'x@evil.com' }], user_ids: [bob.id] } });
+    assert.equal(call.status, 200, call.text);
+    assert.equal(call.data.ringing, 1);
+    await anaWs.next('call.ring', 3000, (m) => m.data.meeting_id === call.data.meeting.id);
+    // Invitees and guests in the request are ignored; none can be added later.
+    assert.equal((await app.db.get('SELECT COUNT(*) AS n FROM meeting_invitations WHERE meeting_id = ?', [call.data.meeting.id])).n, 0);
+    assert.equal((await ext.post(`${API()}/meetings/${call.data.meeting.id}/invitations`, { json: { email: 'y@evil.com' } })).status, 403);
+    // No meeting outside a call, and no call in a conversation they are not in.
+    assert.equal((await ext.post(`${API()}/meetings`, { json: { title: 'Mine' } })).status, 403);
+    assert.equal((await ext.post(`${API()}/meetings`, { json: { conversation_id: dm.id, call: 'video' } })).status, 404);
+    anaWs.ws.close();
+  });
 });

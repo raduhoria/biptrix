@@ -1,5 +1,6 @@
 import { INTL_LOCALE, createTranslator, translateError } from '../core/i18n.js';
 import { readForm, readJson } from '../core/router.js';
+import { can } from '../core/orgs.js';
 import { appError, newId } from '../core/util.js';
 import { meetingInviteEmail, memberMeetingEmail, otpEmail } from '../views/emails.js';
 import { messagePage } from '../views/layout.js';
@@ -49,8 +50,16 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
   // Create: scheduled or instant; from a conversation the meeting is linked
   // to it and announced there as a meeting card. `call: audio|video` (the
   // call buttons) also rings the other members of a DM or group.
-  router.post('/api/o/:org/meetings', ...member, orgs.requirePermission('meetings.create'), async (req, res) => {
+  router.post('/api/o/:org/meetings', ...member, async (req, res) => {
     const body = await readJson(req);
+    // A call (call: audio|video) inside one of the caller's conversations
+    // needs only `calls` (external collaborators too); anything else — a
+    // scheduled or free-standing meeting, invitees, guests — `meetings.create`.
+    const isCall = ['audio', 'video'].includes(body.call) && !!body.conversation_id;
+    if (!can(req.membership.role, 'meetings.create')) {
+      if (!isCall || !can(req.membership.role, 'calls')) throw appError('forbidden', 'Missing permission meetings.create');
+      Object.assign(body, { title: '', scheduled_at: '', user_ids: [], guests: [] });
+    }
     let conversation = null;
     if (body.conversation_id) conversation = await chat.requireConversation(req.org, req.user, body.conversation_id);
     const { meeting, guestTokens } = await meetings.create(
@@ -146,7 +155,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     if (!meetings.isOpen(meeting)) return res.status(410).send(messagePage({ t: req.t, title: meeting.title, message: req.t('errors.meetingEnded'), back }));
     // ?call=audio|video: straight in from a call (no pre-join screen), camera per call kind.
     const call = ['audio', 'video'].includes(req.query.call) ? req.query.call : '';
-    res.send(meetingRoomView({ t: req.t, meeting, org: req.org, mode: 'member', displayName: req.user.name, canInvite: await meetings.canManage(meeting, req.user, req.membership.role), backHref: back, call, userId: req.user.id }));
+    res.send(meetingRoomView({ t: req.t, meeting, org: req.org, mode: 'member', displayName: req.user.name, canInvite: req.membership.role !== 'external' && (await meetings.canManage(meeting, req.user, req.membership.role)), backHref: back, call, userId: req.user.id }));
   });
 
   // ---------------------------------------------------------- guest flow

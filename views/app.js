@@ -24,6 +24,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
       directory: can(role, 'directory'),
       spaces: can(role, 'spaces.browse'),
       meetings: can(role, 'meetings.create'),
+      calls: can(role, 'calls'),
       admin,
     },
     locale: t.locale,
