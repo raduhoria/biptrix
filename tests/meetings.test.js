@@ -200,7 +200,7 @@ describe('administration', () => {
     // Enroll TOTP, then the console opens.
     const page = await a.get('/account/mfa');
     const secret = page.text.match(/user-select-all[^>]*>([A-Z2-7 ]+)</)[1].replace(/ /g, '');
-    const enabled = await a.post('/account/mfa/enable', { form: { code: totpNow(secret) } });
+    const enabled = await a.post('/account/mfa/enable', { form: { code: totpNow(secret), password: 'Parola12345' } });
     assert.equal(enabled.status, 303);
     assert.equal((await a.get(`/o/${org.slug}/admin/members`)).status, 200);
 

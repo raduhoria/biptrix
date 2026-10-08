@@ -5,6 +5,7 @@ import { clientIp } from './http.js';
 
 const PROTOCOL = 1;
 const HEARTBEAT_MS = 25_000;
+const CLOSE_REVOKED = 4001;
 const MAX_FRAME = 64 * 1024;
 const PRESENCE = new Set(['online', 'away', 'dnd']);
 
@@ -88,6 +89,24 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
     sendToUsers(event.org_id, members, event.type, event.data, extra);
   }
 
+  // Every frame runs with fresh rights: the session still exists (logout,
+  // "sign out other sessions", expiry), the user is active, the membership
+  // and its current role, the organization is not suspended. A failure
+  // closes the socket.
+  async function revalidate(ws) {
+    const user = await auth.userForSessionHash(ws.ctx.sessionHash);
+    const membership = user && (await orgs.membership(ws.ctx.org.id, user.id));
+    const org = membership && (await orgs.byId(ws.ctx.org.id));
+    if (!org || org.status !== 'active') {
+      ws.close(CLOSE_REVOKED, 'revoked');
+      return false;
+    }
+    ws.ctx.user = user;
+    ws.ctx.membership = membership;
+    ws.ctx.org = org;
+    return true;
+  }
+
   async function onMessage(ws, raw) {
     let msg;
     try {
@@ -97,11 +116,15 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
     }
     const { type, id, data = {} } = msg || {};
     const reply = (t, d) => send(ws, t, d, id ? { re: id } : {});
+    if (type === 'ping') return reply('pong', {});
+    try {
+      if (!(await revalidate(ws))) return;
+    } catch (err) {
+      return reply('error', { code: 'db_unavailable', message: err.message });
+    }
     const { org, user } = ws.ctx;
     try {
       switch (type) {
-        case 'ping':
-          return reply('pong', {});
         case 'system.sync': {
           const result = await events.since(org.id, user.id, Number(data.since) || 0);
           return reply('system.sync', result);
@@ -116,7 +139,7 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
             attachmentIds: data.attachment_ids || [],
           });
           reply('message.ack', { status: 'persisted', client_message_id: data.client_message_id, conversation_id: data.conversation_id, duplicate, message });
-          if (!duplicate) notifier.afterSend(org, user, await chat.one(data.conversation_id, user), message, mentioned).catch(() => {});
+          if (!duplicate) notifier.afterSend(org, user, await chat.one(org, data.conversation_id, user), message, mentioned).catch(() => {});
           return;
         }
         case 'conversation.read':
@@ -186,6 +209,7 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
       }
       if (url.pathname !== '/ws') return reject(socket, '404 Not Found');
       const found = await auth.sessionFromToken(auth.readToken(req));
+      // (MFA-pending sessions are already refused by sessionFromToken.)
       if (!found) return reject(socket, '401 Unauthorized');
       const org = await orgs.bySlug(url.searchParams.get('org') || '');
       if (!org || org.status !== 'active') return reject(socket, '403 Forbidden');
@@ -201,10 +225,24 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
   // Revocation: close the user's sockets (all orgs, or one), code 4001.
   function disconnectUser(userId, orgId = null) {
     for (const ws of wss.clients) {
-      if (ws.ctx?.user?.id === userId && (!orgId || ws.ctx.org?.id === orgId)) ws.close(4001, 'revoked');
+      if (ws.ctx?.user?.id === userId && (!orgId || ws.ctx.org?.id === orgId)) ws.close(CLOSE_REVOKED, 'revoked');
     }
     rooms.disconnectUser(userId, orgId);
   }
+
+  // Revoked sessions (logout, other sessions signed out, expiry, password
+  // reset) close their chat and meeting sockets at once.
+  auth.onRevoke((hashes) => {
+    const set = new Set(hashes);
+    for (const ws of wss.clients) if (ws.ctx?.sessionHash && set.has(ws.ctx.sessionHash)) ws.close(CLOSE_REVOKED, 'revoked');
+  });
+
+  // Idle sockets are re-checked too (expiry, suspension, revocation done by
+  // another node).
+  const sweep = setInterval(() => {
+    for (const ws of wss.clients) if (ws.ctx?.org && ws.readyState === ws.OPEN) revalidate(ws).catch(() => {});
+  }, 30_000);
+  sweep.unref();
 
   const presenceSnapshot = (orgId) => {
     const out = {};
@@ -217,10 +255,13 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
     deliver,
     disconnectUser,
     presenceSnapshot,
+    // An event could not be delivered: clients of the org reload their state.
+    resetOrg: (orgId) => broadcastOrg(orgId, 'system.reset', {}),
     isOnline: (orgId, userId) => !!byUser.get(`${orgId}:${userId}`)?.size,
     stats: () => ({ sockets: wss.clients.size, users: byUser.size }),
     close: () => {
       clearInterval(heartbeat);
+      clearInterval(sweep);
       limiter.stop();
       for (const ws of wss.clients) ws.terminate();
       wss.close();

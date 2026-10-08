@@ -30,17 +30,23 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     res.send(setupView({ t: req.t }));
   });
 
+  // The operator, the first organization and its owner membership are one
+  // atomic batch guarded by "no other user exists": concurrent setup
+  // requests cannot create two operators.
   router.post('/setup', async (req, res) => {
     if (await users.count()) return res.redirect('/login');
     const form = Object.fromEntries(await readForm(req));
     try {
       const password = auth.validatePassword(form.password);
       const created = users.insertStatement({ email: form.email, name: form.name, passwordHash: await auth.hashPassword(password), platformRole: 'operator', locale: req.t.locale });
-      await db.batch([created.statement]);
-      const user = await users.byId(created.id);
-      const org = await orgs.create({ name: form.org_name, ownerId: user.id, actor: user, ip: req.ip });
-      await auth.createSession(res, req, user.id);
-      res.redirect(`/o/${org.slug}`);
+      const onlyUser = '(SELECT COUNT(*) FROM users) = 1 AND EXISTS (SELECT 1 FROM users WHERE id = ?)';
+      const [sql, args] = created.statement;
+      const userInsert = [sql.replace(/VALUES \(([^)]*)\)$/s, 'SELECT $1 WHERE NOT EXISTS (SELECT 1 FROM users)'), args];
+      const org = await orgs.createStatements({ name: form.org_name, ownerId: created.id, actor: { id: created.id, email: form.email }, ip: req.ip, when: onlyUser, whenArgs: [created.id] });
+      const [first] = await db.batch([userInsert, ...org.statements]);
+      if (!first.changes) return res.redirect('/login');
+      await auth.createSession(res, req, created.id);
+      res.redirect(`/o/${(await orgs.byId(org.id)).slug}`);
     } catch (err) {
       res.status(400).send(setupView({ t: req.t, values: form, error: translateError(req.t, err) }));
     }
@@ -220,34 +226,63 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
   });
 
   // MFA enrollment: the pending secret lives in a short-lived encrypted
-  // cookie until the first code proves the authenticator app has it.
+  // cookie bound to this account until the first code proves the
+  // authenticator app has it. Enabling needs the current password (a stolen
+  // session alone cannot install an attacker's factor) and is refused while
+  // a factor is already active — that one must be removed first, with its code.
+  const pendingSecret = (req) => {
+    try {
+      const [userId, secret] = secretBox.decrypt(req.cookies[MFA_COOKIE]).split(':');
+      return userId === req.user.id ? secret : '';
+    } catch {
+      return '';
+    }
+  };
+  const setupFor = (req, secret) => (secret ? { secret, uri: totpUri({ secret, account: req.user.email, issuer: req.t('app.name') }) } : null);
+
+  async function passwordOk(req, password) {
+    const creds = await users.credentials(req.user.id);
+    return !!creds?.password_hash && (await auth.verifyPassword(password || '', creds.password_hash));
+  }
+
   router.get('/account/mfa', requireUser, async (req, res) => {
     if (req.user.mfa_enabled) return res.redirect('/account#mfa');
     const secret = newTotpSecret();
-    res.cookie(MFA_COOKIE, secretBox.encrypt(secret), { secure: req.secure, maxAgeSeconds: 600, path: '/account' });
-    await renderAccount(req, res, { mfaSetup: { secret, uri: totpUri({ secret, account: req.user.email, issuer: req.t('app.name') }) }, notice: req.query.next ? req.t('account.mfaRequired') : '' });
+    res.cookie(MFA_COOKIE, secretBox.encrypt(`${req.user.id}:${secret}`), { secure: req.secure, maxAgeSeconds: 600, path: '/account' });
+    await renderAccount(req, res, { mfaSetup: setupFor(req, secret), notice: req.query.next ? req.t('account.mfaRequired') : '' });
   });
 
   router.post('/account/mfa/enable', requireUser, async (req, res) => {
+    if (req.user.mfa_enabled) return renderAccount(req, res, { error: req.t('account.mfaAlreadyOn'), status: 409 });
     const form = await readForm(req);
-    let secret = '';
-    try {
-      secret = secretBox.decrypt(req.cookies[MFA_COOKIE]);
-    } catch {
-      secret = '';
+    const secret = pendingSecret(req);
+    const key = `mfa-enroll:${req.user.id}`;
+    if (await auth.tooManyFailures(key, 5)) return renderAccount(req, res, { error: req.t('auth.tooMany'), status: 429 });
+    if (!(await passwordOk(req, form.get('password')))) {
+      await auth.recordFailure(key);
+      return renderAccount(req, res, { error: req.t('account.wrongPassword'), mfaSetup: setupFor(req, secret), status: 400 });
     }
     if (!secret || !verifyTotp(secret, form.get('code'))) {
-      return renderAccount(req, res, { error: req.t('auth.badCode'), mfaSetup: secret ? { secret, uri: totpUri({ secret, account: req.user.email, issuer: req.t('app.name') }) } : null, status: 400 });
+      return renderAccount(req, res, { error: req.t('auth.badCode'), mfaSetup: setupFor(req, secret), status: 400 });
     }
-    await users.setTotpSecret(req.user.id, secretBox.encrypt(secret));
+    // Conditional write: two concurrent enrollments cannot both win.
+    const [res1] = await db.batch([['UPDATE users SET totp_secret = ?, updated_at = ? WHERE id = ? AND totp_secret IS NULL', [secretBox.encrypt(secret), nowIso(), req.user.id]]]);
+    if (!res1.changes) return renderAccount(req, res, { error: req.t('account.mfaAlreadyOn'), status: 409 });
     await auth.markMfa(req);
+    await auth.destroyUserSessions(req.user.id, req.session.id_hash);
     await audit.log({ actor: req.user, action: 'auth.mfa_enable', resourceType: 'user', resourceId: req.user.id, ip: req.ip });
     res.cookie(MFA_COOKIE, '', { maxAgeSeconds: 0, path: '/account' });
     res.redirect(safeNext(form.get('next'), '/account?notice=mfaEnabled'));
   });
 
   router.post('/account/mfa/disable', requireUser, async (req, res) => {
-    if (!(await auth.checkTotp(req.user.id, (await readForm(req)).get('code')))) return renderAccount(req, res, { error: req.t('auth.badCode'), status: 400 });
+    const form = await readForm(req);
+    const key = `mfa-disable:${req.user.id}`;
+    if (await auth.tooManyFailures(key, 5)) return renderAccount(req, res, { error: req.t('auth.tooMany'), status: 429 });
+    if (!(await passwordOk(req, form.get('password'))) || !(await auth.checkTotp(req.user.id, form.get('code')))) {
+      await auth.recordFailure(key);
+      return renderAccount(req, res, { error: req.t('account.mfaDisableFailed'), status: 400 });
+    }
     await users.setTotpSecret(req.user.id, null);
     await audit.log({ actor: req.user, action: 'auth.mfa_disable', resourceType: 'user', resourceId: req.user.id, ip: req.ip });
     res.redirect('/account?notice=mfaDisabled');

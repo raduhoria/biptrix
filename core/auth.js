@@ -13,6 +13,12 @@ const TOUCH_EVERY_MS = 5 * 60_000;
 // cookie value is stored), sign-in throttling and request guards. Org-level
 // guards (membership, role) are in core/orgs.js.
 export function createAuth({ db, users, config, secretBox }) {
+  // Live connections (chat and meeting sockets) subscribe here and close the
+  // sockets of revoked sessions immediately.
+  const revokeListeners = [];
+  const revoked = (hashes) => {
+    if (hashes.length) for (const fn of revokeListeners) fn(hashes);
+  };
   const cookieName = (secure) => (secure ? '__Host-sid' : 'sid');
 
   async function hashPassword(password) {
@@ -74,6 +80,7 @@ export function createAuth({ db, users, config, secretBox }) {
     if (!session) return null;
     if (session.expires_at < nowIso()) {
       await db.run('DELETE FROM sessions WHERE id_hash = ?', [session.id_hash]);
+      revoked([session.id_hash]);
       return null;
     }
     const user = await users.byId(session.user_id);
@@ -87,11 +94,29 @@ export function createAuth({ db, users, config, secretBox }) {
 
   async function destroySession(req, res) {
     const token = readToken(req);
-    if (token) await db.run('DELETE FROM sessions WHERE id_hash = ?', [sha256(token)]);
+    if (token) {
+      await db.run('DELETE FROM sessions WHERE id_hash = ?', [sha256(token)]);
+      revoked([sha256(token)]);
+    }
     res.cookie(cookieName(req.secure), '', { secure: req.secure, maxAgeSeconds: 0 });
   }
 
-  const destroyUserSessions = (userId, exceptHash = '') => db.run('DELETE FROM sessions WHERE user_id = ? AND id_hash != ?', [userId, exceptHash]);
+  async function destroyUserSessions(userId, exceptHash = '') {
+    const rows = await db.all('SELECT id_hash FROM sessions WHERE user_id = ? AND id_hash != ?', [userId, exceptHash]);
+    await db.run('DELETE FROM sessions WHERE user_id = ? AND id_hash != ?', [userId, exceptHash]);
+    revoked(rows.map((r) => r.id_hash));
+  }
+
+  // Re-validation of a live connection by its stored session hash: the
+  // session still exists, has not expired, the user is active and has passed
+  // MFA. Returns the current user or null.
+  async function userForSessionHash(hash) {
+    const session = await db.get('SELECT * FROM sessions WHERE id_hash = ?', [hash]);
+    if (!session || session.expires_at < nowIso()) return null;
+    const user = await users.byId(session.user_id);
+    if (!user || user.status !== 'active' || (user.mfa_enabled && !session.mfa_ok)) return null;
+    return user;
+  }
 
   async function markMfa(req) {
     await db.run('UPDATE sessions SET mfa_ok = 1 WHERE id_hash = ?', [sha256(readToken(req))]);
@@ -145,16 +170,22 @@ export function createAuth({ db, users, config, secretBox }) {
     readToken,
     destroySession,
     destroyUserSessions,
+    userForSessionHash,
+    onRevoke: (fn) => revokeListeners.push(fn),
     markMfa,
     checkTotp,
     loadUser,
     requireUser,
     requireMfa,
     requireOperator,
-    pruneExpired: () => db.batch([
+    pruneExpired: async () => {
+      const expired = await db.all('SELECT id_hash FROM sessions WHERE expires_at < ?', [nowIso()]);
+      revoked(expired.map((r) => r.id_hash));
+      return db.batch([
       ['DELETE FROM sessions WHERE expires_at < ?', [nowIso()]],
       ['DELETE FROM auth_failures WHERE created_at < ?', [new Date(Date.now() - THROTTLE_WINDOW_MS).toISOString()]],
       ['DELETE FROM email_tokens WHERE expires_at < ?', [nowIso()]],
-    ]),
+      ]);
+    },
   };
 }

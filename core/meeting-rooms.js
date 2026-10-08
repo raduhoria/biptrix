@@ -1,5 +1,5 @@
 const PROTOCOL = 1;
-const RECHECK_MS = 30_000;
+const RECHECK_MS = 10_000;
 
 // createRooms: meeting signaling over /ws/meeting?id=<meetingId> (spec §8).
 // Members authenticate with their session (and must belong to the meeting's
@@ -30,6 +30,12 @@ const RECHECK_MS = 30_000;
 const SLOTS = ['audio', 'camera', 'screen'];
 export function createRooms({ auth, orgs, meetings, media }) {
   const rooms = new Map(); // meetingId → { meeting, peers: Map<pid, ws>, lobby: Map<pid, ws> }
+
+  // Revoked sessions leave their meetings at once.
+  auth.onRevoke((hashes) => {
+    const set = new Set(hashes);
+    for (const r of rooms.values()) for (const ws of [...r.peers.values(), ...r.lobby.values()]) if (ws.ctx.sessionHash && set.has(ws.ctx.sessionHash)) closeWith(ws, 'removed');
+  });
 
   const send = (ws, type, data = {}, re = undefined) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ v: PROTOCOL, type, data, re }));
@@ -75,14 +81,28 @@ export function createRooms({ auth, orgs, meetings, media }) {
     if (guest && guest.meeting.id === meetingId) return { kind: 'guest', meetingId, ip: req.ip, inv: guest.inv, guestToken: req.cookies.gsid };
     const found = await auth.sessionFromToken(auth.readToken(req));
     if (!found) return null;
-    const meeting = await meetings.byId(meetingId);
-    if (!meeting) return null;
-    const membership = await orgs.membership(meeting.org_id, found.user.id);
-    if (!membership) return null;
-    return { kind: 'member', meetingId, ip: req.ip, user: found.user, orgRole: membership.role };
+    const ctx = { kind: 'member', meetingId, ip: req.ip, sessionHash: found.session.id_hash, user: found.user, orgRole: null };
+    return (await refresh(ctx)) ? ctx : null;
   }
 
-  // Re-validates the socket's right to be here (session, membership, meeting).
+  // Current rights of a member connection: the session is still valid, the
+  // user still belongs to the meeting's organization (with their current
+  // role, not the one they had when the socket opened), and the organization
+  // is active. Updates ctx; false if any of it no longer holds.
+  async function refresh(ctx) {
+    const user = await auth.userForSessionHash(ctx.sessionHash);
+    const meeting = user && (await meetings.byId(ctx.meetingId));
+    const membership = meeting && (await orgs.membership(meeting.org_id, user.id));
+    const org = membership && (await orgs.byId(meeting.org_id));
+    if (!org || org.status !== 'active') return false;
+    ctx.user = user;
+    ctx.orgRole = membership.role;
+    return true;
+  }
+
+  // Re-validates the socket's right to be here (session, membership, role,
+  // organization, meeting state). Guests: their guest session (which also
+  // checks the invitation and the organization).
   async function currentMeeting(ws) {
     const meeting = await meetings.byId(ws.ctx.meetingId);
     if (!meeting || !meetings.isOpen(meeting)) return null;
@@ -90,8 +110,7 @@ export function createRooms({ auth, orgs, meetings, media }) {
       const guest = await meetings.guestFromToken(ws.ctx.guestToken);
       return guest && guest.meeting.id === meeting.id ? meeting : null;
     }
-    const membership = await orgs.membership(meeting.org_id, ws.ctx.user.id);
-    return membership ? meeting : null;
+    return (await refresh(ws.ctx)) ? meeting : null;
   }
 
   async function join(ws, data) {
@@ -154,6 +173,10 @@ export function createRooms({ auth, orgs, meetings, media }) {
     const { type, id, data = {} } = msg || {};
     const r = rooms.get(ws.ctx.meetingId);
     const inRoom = !!(r && ws.participant && r.peers.get(ws.participant.id) === ws);
+    // ICE/SDP relays are too frequent to re-check one by one; they are only
+    // possible inside the room, which revocations and the periodic recheck
+    // leave immediately.
+    if (type !== 'signal' && type !== 'join' && !(await currentMeeting(ws).catch(() => null))) return closeWith(ws, 'removed');
     try {
       switch (type) {
         case 'join':

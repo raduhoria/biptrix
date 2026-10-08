@@ -5,7 +5,9 @@ import path from 'node:path';
 // missing; anything that alters an existing table goes here with the next
 // version number and is applied exactly once (recorded in schema_migrations).
 const MIGRATIONS = [
-  // [2, ['ALTER TABLE users ADD COLUMN avatar_key TEXT']],
+  // Who accepted an invitation: lets the acceptance batch tell whether its
+  // own conditional update won.
+  [2, ['ALTER TABLE org_invites ADD COLUMN accepted_by TEXT']],
 ];
 
 export async function runMigrations(db) {

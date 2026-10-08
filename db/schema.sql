@@ -208,6 +208,17 @@ CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_conversation ON attachments(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_attachments_org ON attachments(org_id);
 
+-- Stored files whose attachment row is gone (message deleted, retention,
+-- conversation removed). Filled by a trigger, so no deletion path can skip
+-- it; the maintenance job unlinks the bytes and clears the row.
+CREATE TABLE IF NOT EXISTS file_deletions (
+  storage_key TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS attachments_file_cleanup AFTER DELETE ON attachments BEGIN
+  INSERT OR IGNORE INTO file_deletions (storage_key, created_at) VALUES (old.storage_key, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+END;
+
 -- Full-text search over message bodies (external content, kept in sync by
 -- triggers so both SQLite and rqlite maintain it on every write).
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(

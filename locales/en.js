@@ -135,6 +135,8 @@ export default {
     mfaStep2: 'Enter this key manually (or open the link on your phone):',
     mfaStep3: 'Type the 6-digit code the app shows.',
     mfaOpenApp: 'Open in authenticator app',
+    mfaAlreadyOn: 'Two-step verification is already on. Turn it off first with your current code.',
+    mfaDisableFailed: 'Wrong password or code.',
     mfaEnable: 'Turn on',
     mfaDisable: 'Turn off MFA',
     sessions: 'Active sessions',

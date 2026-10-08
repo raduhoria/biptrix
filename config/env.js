@@ -8,7 +8,9 @@ export function loadConfig(env = process.env) {
   const port = Number(env.PORT) || 3000;
   return {
     port,
-    host: env.HOST || '',
+    // Loopback by default; set HOST=0.0.0.0 (or an interface address) to
+    // expose the server — normally only nginx should reach it.
+    host: env.HOST || '127.0.0.1',
     appUrl: (env.APP_URL || `http://localhost:${port}`).replace(/\/+$/, ''),
     trustProxy: env.TRUST_PROXY === '1',
     cookieSecure: env.COOKIE_SECURE === '1',

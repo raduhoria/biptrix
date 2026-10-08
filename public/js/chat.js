@@ -188,6 +188,8 @@ function handle(msg) {
       return onRead(d);
     case 'typing':
       return onTyping(d);
+    case 'system.reset':
+      return loadAll().catch(() => {});
     case 'presence':
       state.presence[d.user_id] = d.status;
       return renderPresence(d.user_id);
@@ -534,8 +536,11 @@ function onMessage(m, created) {
     const cache = state.messages.get(m.conversation_id);
     if (cache?.loaded) upsert(cache.list, m);
   }
-  if (state.thread === m.id) {
-    state.threads.get(m.id).parent = m;
+  // The thread may still be loading (no cache entry yet): openThread
+  // fetches the current parent itself.
+  const loadedThread = state.threads.get(m.id);
+  if (state.thread === m.id && loadedThread) {
+    loadedThread.parent = m;
     renderThread();
   }
   if (created) {

@@ -56,7 +56,7 @@ export async function createApp(config, { quiet = false } = {}) {
   let realtime = null;
   const notifier = createNotifier({ db, mailer, policies, config, isOnline: (orgId, userId) => realtime.isOnline(orgId, userId) });
   realtime = createRealtime({ config, auth, orgs, chat, events, rooms, notifier });
-  await events.start(realtime.deliver);
+  await events.start(realtime.deliver, (event) => realtime.resetOrg(event.org_id));
 
   // Readiness: the database answers (rqlite: a quorum-backed read).
   async function health() {
@@ -122,7 +122,9 @@ export async function createApp(config, { quiet = false } = {}) {
   server.on('upgrade', (req, socket, head) => realtime.handleUpgrade(req, socket, head));
 
   // Housekeeping: expired sessions/tokens, the event replay window, orphan
-  // uploads, message retention per policy, WAL checkpoint.
+  // uploads, message retention per policy, the file deletion queue, WAL
+  // checkpoint. Retention also removes the copies of deleted messages kept
+  // in the event log, so no text outlives the policy there either.
   async function maintenance() {
     try {
       await auth.pruneExpired();
@@ -130,8 +132,16 @@ export async function createApp(config, { quiet = false } = {}) {
       await files.pruneOrphans();
       for (const row of await db.all("SELECT org_id, json_extract(data, '$.message_retention_days') AS days FROM policies WHERE json_extract(data, '$.message_retention_days') > 0")) {
         const cutoff = new Date(Date.now() - row.days * 86400_000).toISOString();
-        await db.run('DELETE FROM messages WHERE org_id = ? AND created_at < ? AND pinned_at IS NULL', [row.org_id, cutoff]);
+        await db.batch([
+          ['DELETE FROM messages WHERE org_id = ? AND created_at < ? AND pinned_at IS NULL', [row.org_id, cutoff]],
+          [
+            `DELETE FROM events WHERE org_id = ? AND type IN ('message.created', 'message.updated')
+               AND NOT EXISTS (SELECT 1 FROM messages WHERE id = json_extract(events.data, '$.id'))`,
+            [row.org_id],
+          ],
+        ]);
       }
+      await files.processDeletions();
       await db.checkpoint();
     } catch (err) {
       console.error('Maintenance failed:', err.message);
@@ -149,5 +159,5 @@ export async function createApp(config, { quiet = false } = {}) {
     await db.close();
   }
 
-  return { server, db, close, services: deps };
+  return { server, db, close, maintenance, services: deps };
 }

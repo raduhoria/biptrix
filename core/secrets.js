@@ -26,9 +26,11 @@ export function createSecretBox(secret) {
     return `enc:v1:${Buffer.concat([iv, cipher.getAuthTag(), data]).toString('base64')}`;
   }
 
+  // Only values produced by encrypt() are accepted: a plain value (e.g. a
+  // crafted cookie) is an error, never passed through.
   function decrypt(stored) {
     const value = String(stored || '');
-    if (!value.startsWith('enc:v1:')) return value;
+    if (!value.startsWith('enc:v1:')) throw new Error('Not an encrypted value');
     const raw = Buffer.from(value.slice(7), 'base64');
     const decipher = createDecipheriv('aes-256-gcm', key, raw.subarray(0, 12));
     decipher.setAuthTag(raw.subarray(12, 28));

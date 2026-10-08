@@ -135,6 +135,8 @@ export default {
     mfaStep2: 'Introdu manual cheia de mai jos (sau deschide linkul pe telefon):',
     mfaStep3: 'Scrie codul de 6 cifre afișat de aplicație.',
     mfaOpenApp: 'Deschide în aplicația de autentificare',
+    mfaAlreadyOn: 'Autentificarea în doi pași este deja activă. Dezactiveaz-o întâi cu codul actual.',
+    mfaDisableFailed: 'Parola sau codul nu sunt corecte.',
     mfaEnable: 'Activează',
     mfaDisable: 'Dezactivează MFA',
     sessions: 'Sesiuni active',

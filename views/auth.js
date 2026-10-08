@@ -118,8 +118,9 @@ export function accountView({ t, user, orgs, sessions, currentHash, notice = '',
   const mfa = user.mfa_enabled
     ? `<p class="mb-3"><span class="badge text-bg-success">${icon('shield')} ${escapeHtml(t('account.mfaOn'))}</span></p>
        <form method="post" action="/account/mfa/disable" class="row g-2 align-items-end">
-         <div class="col-sm-6"><label class="form-label" for="dis-code">${escapeHtml(t('auth.code'))}</label><input class="form-control" id="dis-code" name="code" inputmode="numeric" required></div>
-         <div class="col-sm-6"><button class="btn btn-outline-danger w-100">${escapeHtml(t('account.mfaDisable'))}</button></div>
+         <div class="col-sm-4"><label class="form-label" for="dis-pass">${escapeHtml(t('account.currentPassword'))}</label><input class="form-control" id="dis-pass" type="password" name="password" autocomplete="current-password" required></div>
+         <div class="col-sm-4"><label class="form-label" for="dis-code">${escapeHtml(t('auth.code'))}</label><input class="form-control" id="dis-code" name="code" inputmode="numeric" required></div>
+         <div class="col-sm-4"><button class="btn btn-outline-danger w-100">${escapeHtml(t('account.mfaDisable'))}</button></div>
        </form>`
     : mfaSetup
       ? `<ol class="small ps-3">
@@ -130,8 +131,9 @@ export function accountView({ t, user, orgs, sessions, currentHash, notice = '',
          </ol>
          <form method="post" action="/account/mfa/enable" class="row g-2 align-items-end">
            <input type="hidden" name="next" value="${escapeHtml(next)}">
-           <div class="col-sm-6"><label class="form-label" for="en-code">${escapeHtml(t('auth.code'))}</label><input class="form-control" id="en-code" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></div>
-           <div class="col-sm-6"><button class="btn btn-primary w-100">${escapeHtml(t('account.mfaEnable'))}</button></div>
+           <div class="col-sm-4"><label class="form-label" for="en-pass">${escapeHtml(t('account.currentPassword'))}</label><input class="form-control" id="en-pass" type="password" name="password" autocomplete="current-password" required></div>
+           <div class="col-sm-4"><label class="form-label" for="en-code">${escapeHtml(t('auth.code'))}</label><input class="form-control" id="en-code" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></div>
+           <div class="col-sm-4"><button class="btn btn-primary w-100">${escapeHtml(t('account.mfaEnable'))}</button></div>
          </form>`
       : `<p class="text-body-secondary small">${escapeHtml(t('account.mfaWhy'))}</p><a class="btn btn-primary" href="/account/mfa${next ? `?next=${encodeURIComponent(next)}` : ''}">${escapeHtml(t('account.mfaSetup'))}</a>`;
 

@@ -46,8 +46,12 @@ function stage(name) {
   root.dataset.stage = name;
 }
 
+// Leaving the room by any path (ended, removed, rejected, disconnected)
+// releases the camera, microphone and screen, and the media connections.
 function setEnded(titleKey, textKey = '', allowRejoin = false) {
   stage('ended');
+  teardownPeers();
+  for (const kind of ['audio', 'video', 'screen']) stopTrack(kind);
   $('#ended-title').textContent = t(titleKey);
   $('#ended-text').textContent = textKey ? t(textKey) : '';
   $('#rejoin-btn').hidden = !allowRejoin;
@@ -776,10 +780,18 @@ root.addEventListener('click', async (e) => {
       btn.disabled = true;
       if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
       return connect();
-    case 'rejoin':
+    case 'rejoin': {
       state.leaving = false;
+      $('[data-action="join"]').disabled = false;
+      $('#media-error').hidden = true;
       stage('prejoin');
+      if (navigator.mediaDevices?.getUserMedia) {
+        if (state.cam) await startCamera();
+        await startMic();
+      }
+      renderPreview();
       return;
+    }
     default:
   }
 });
