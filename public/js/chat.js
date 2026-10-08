@@ -1,0 +1,1572 @@
+import { $, $$, EMOJI, api, debounce, esc, hue, icon, initials, randomId, renderMarkdown, toast, translator } from './lib.js';
+
+// Chat client for /o/:org. State lives in plain Maps; the DOM is re-rendered
+// per region (sidebar lists, message list, panel). Durable updates arrive as
+// events with an event_id: the client keeps the highest one (cursor) and
+// after a reconnect asks the server for everything after it (system.sync).
+// Outgoing messages go to a local outbox (localStorage) with a
+// client_message_id, so a send interrupted by a disconnect or a reload is
+// retried and the server stores it exactly once.
+
+const boot = JSON.parse($('#boot').textContent);
+const t = translator(boot.strings);
+const ME = boot.me.id;
+const ORG = boot.org;
+const API = `/api/o/${ORG.slug}`;
+const OUTBOX_KEY = `outbox:${ORG.id}:${ME}`;
+const dateFmt = new Intl.DateTimeFormat(boot.locale === 'ro' ? 'ro-RO' : 'en-GB', { dateStyle: 'full' });
+const timeFmt = new Intl.DateTimeFormat(boot.locale === 'ro' ? 'ro-RO' : 'en-GB', { timeStyle: 'short' });
+const shortFmt = new Intl.DateTimeFormat(boot.locale === 'ro' ? 'ro-RO' : 'en-GB', { day: 'numeric', month: 'short' });
+
+const state = {
+  cursor: 0,
+  conversations: new Map(),
+  directory: new Map(),
+  presence: {},
+  messages: new Map(), // convId → { list: [], hasMore: true, loaded: false }
+  threads: new Map(), // parentId → { parent, list: [] }
+  outbox: new Map(JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]')),
+  typing: new Map(), // convId → Map<userId, expiresAt>
+  reads: new Map(), // convId → Map<userId, seq>
+  current: null,
+  thread: null,
+  panel: null,
+  markerSeq: null, // "new messages" line: last read seq when the conversation was opened
+  view: 'empty',
+  staged: { main: [], thread: [] },
+};
+
+// ---------------------------------------------------------------- helpers
+
+const person = (id) => state.directory.get(id) || { id, name: t('unknownUser'), email: '' };
+const avatar = (id, size = '') => `<span class="avatar ${size}" style="--h:${hue(id)}">${esc(initials(person(id).name))}<span class="presence-dot ${state.presence[id] || 'offline'}"></span></span>`;
+const replyLabel = (n) => t(n === 1 ? 'replyOne' : 'replies', { n });
+const mentionHtml = (id) => `<span class="mention${id === ME ? ' mention-me' : ''}">@${esc(person(id).name)}</span>`;
+
+function convName(c) {
+  if (!c) return '';
+  if (c.type === 'space') return c.name;
+  if (c.name) return c.name;
+  const others = (c.member_ids || []).filter((id) => id !== ME);
+  if (!others.length) return `${person(ME).name} (${t('you')})`;
+  return others.map((id) => person(id).name).join(', ');
+}
+
+function convIcon(c) {
+  if (c.type === 'space') return `<span class="conv-ic space">${icon(c.visibility === 'private' ? 'lock' : 'hash')}</span>`;
+  const others = (c.member_ids || []).filter((id) => id !== ME);
+  if (c.type === 'dm') return avatar(others[0] || ME, 'avatar-sm');
+  return `<span class="conv-ic group">${icon('users')}</span>`;
+}
+
+const saveOutbox = () => localStorage.setItem(OUTBOX_KEY, JSON.stringify([...state.outbox]));
+const isVisible = () => document.visibilityState === 'visible' && document.hasFocus();
+
+function setUrl(path) {
+  if (location.pathname !== path) history.pushState({}, '', path);
+}
+
+function errorText(err) {
+  const key = `errors.${err.details?.reason || err.code}`;
+  const text = t(key);
+  return text === key ? err.message : text;
+}
+
+// ------------------------------------------------------------- websocket
+
+const socket = (() => {
+  let ws = null;
+  let attempts = 0;
+  let syncing = false;
+  let buffered = [];
+  const waiting = new Map();
+  let seq = 0;
+
+  function setConn(stateName) {
+    const el = $('#conn-state');
+    el.dataset.state = stateName;
+    $('.conn-text', el).textContent = t(`conn.${stateName}`);
+  }
+
+  function connect() {
+    setConn(attempts ? 'reconnecting' : 'connecting');
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?org=${encodeURIComponent(ORG.slug)}`);
+    ws.onopen = () => {
+      attempts = 0;
+      syncing = true;
+      buffered = [];
+      send('system.sync', { since: state.cursor });
+      send('presence.set', { status: localStorage.getItem('presence') || 'online' });
+    };
+    ws.onmessage = (e) => {
+      let msg;
+      try {
+        msg = JSON.parse(e.data);
+      } catch {
+        return;
+      }
+      if (msg.re && waiting.has(msg.re)) {
+        waiting.get(msg.re)(msg);
+        waiting.delete(msg.re);
+      }
+      if (msg.type === 'system.sync') return onSync(msg.data);
+      if (msg.event_id && syncing) return buffered.push(msg);
+      handle(msg);
+    };
+    ws.onclose = (e) => {
+      ws = null;
+      for (const resolve of waiting.values()) resolve(null);
+      waiting.clear();
+      if (e.code === 4001) {
+        setConn('revoked');
+        return setTimeout(() => location.reload(), 1500);
+      }
+      setConn('offline');
+      const delay = Math.min(30_000, 500 * 2 ** attempts++) + Math.random() * 500;
+      setTimeout(connect, delay);
+    };
+  }
+
+  async function onSync(data) {
+    if (data.reset) {
+      await loadAll();
+    } else {
+      for (const ev of data.events) handle({ type: ev.type, event_id: ev.id, data: ev.data });
+      state.cursor = Math.max(state.cursor, data.cursor || 0);
+    }
+    syncing = false;
+    for (const msg of buffered) handle(msg);
+    buffered = [];
+    setConn('online');
+    flushOutbox();
+  }
+
+  function send(type, data) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return null;
+    const id = `c${++seq}`;
+    ws.send(JSON.stringify({ v: 1, type, id, data }));
+    return id;
+  }
+
+  // request: send and wait for the reply frame (re = id), null if offline.
+  function request(type, data, timeoutMs = 15_000) {
+    const id = send(type, data);
+    if (!id) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      waiting.set(id, resolve);
+      setTimeout(() => {
+        if (waiting.has(id)) {
+          waiting.delete(id);
+          resolve(null);
+        }
+      }, timeoutMs);
+    });
+  }
+
+  return { connect, send, request, isOpen: () => ws?.readyState === WebSocket.OPEN && !syncing };
+})();
+
+// Every server frame. Durable events advance the cursor; duplicates (an
+// event already seen through sync) are ignored.
+function handle(msg) {
+  if (msg.event_id) {
+    if (msg.event_id <= state.cursor) return;
+    state.cursor = msg.event_id;
+  }
+  const d = msg.data || {};
+  switch (msg.type) {
+    case 'message.created':
+    case 'message.updated':
+      return onMessage(d, msg.type === 'message.created');
+    case 'conversation.created':
+    case 'conversation.members':
+    case 'conversation.updated':
+      return refreshConversation(d.id);
+    case 'conversation.removed':
+      return dropConversation(d.id);
+    case 'conversation.read':
+      return onRead(d);
+    case 'typing':
+      return onTyping(d);
+    case 'presence':
+      state.presence[d.user_id] = d.status;
+      return renderPresence(d.user_id);
+    default:
+  }
+}
+
+// --------------------------------------------------------------- loading
+
+async function loadAll() {
+  const data = await api(`${API}/bootstrap`);
+  state.cursor = Math.max(state.cursor, data.cursor);
+  state.directory = new Map(data.directory.map((u) => [u.id, u]));
+  state.directory.set(ME, { ...boot.me, ...(state.directory.get(ME) || {}) });
+  state.presence = data.presence;
+  state.conversations = new Map(data.conversations.map((c) => [c.id, c]));
+  // Cached message pages may be stale after a reset: refetch on open.
+  for (const cache of state.messages.values()) cache.stale = true;
+  const live = $('#live-count');
+  live.hidden = !data.meetings_live;
+  live.textContent = data.meetings_live || '';
+  renderSidebar();
+  if (state.current) {
+    if (!state.conversations.has(state.current)) showEmpty();
+    else await openConversation(state.current, { push: false });
+  }
+}
+
+async function refreshConversation(id) {
+  try {
+    const { conversation } = await api(`${API}/conversations/${id}`);
+    const old = state.conversations.get(id);
+    state.conversations.set(id, old ? { ...conversation, unread: old.unread, mentions: old.mentions, last_message: old.last_message } : conversation);
+    for (const uid of conversation.member_ids || []) if (!state.directory.has(uid)) await refreshDirectory();
+    renderSidebar();
+    if (state.current === id) renderHeader();
+    if (state.panel === 'members' && state.current === id) openMembers();
+  } catch (err) {
+    if (err.code === 'not_found') dropConversation(id);
+  }
+}
+
+const refreshDirectory = debounce(async () => {
+  const data = await api(`${API}/bootstrap`);
+  state.directory = new Map(data.directory.map((u) => [u.id, u]));
+  renderSidebar();
+}, 300);
+
+function dropConversation(id) {
+  state.conversations.delete(id);
+  state.messages.delete(id);
+  renderSidebar();
+  if (state.current === id) {
+    toast(t('removedFromConversation'), 'warning');
+    showEmpty();
+  }
+}
+
+// ---------------------------------------------------------------- sidebar
+
+function renderSidebar() {
+  const list = [...state.conversations.values()].sort((a, b) => (b.last_message_at || b.created_at).localeCompare(a.last_message_at || a.created_at));
+  const item = (c) => {
+    const unread = c.unread > 0 && c.id !== state.current;
+    const preview = c.last_message ? (c.last_message.kind === 'meeting' ? `📹 ${c.last_message.body}` : c.last_message.body.replace(/<@([A-Za-z0-9_-]+)>/g, (m, id) => `@${person(id).name}`)) : '';
+    return `<li><a class="conv-item${c.id === state.current ? ' active' : ''}${unread ? ' unread' : ''}" href="/o/${esc(ORG.slug)}/c/${esc(c.id)}" data-conv="${esc(c.id)}">
+      ${convIcon(c)}
+      <span class="conv-text"><span class="conv-name">${esc(convName(c))}</span>${preview ? `<span class="conv-preview">${esc(preview.slice(0, 80))}</span>` : ''}</span>
+      ${c.muted ? icon('bell-off', 'text-body-tertiary') : ''}
+      ${unread ? `<span class="badge rounded-pill ${c.mentions ? 'text-bg-danger' : 'text-bg-primary'}">${c.mentions ? '@' : ''}${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
+    </a></li>`;
+  };
+  const direct = list.filter((c) => c.type !== 'space');
+  const spaces = list.filter((c) => c.type === 'space');
+  $('#list-direct').innerHTML = direct.map(item).join('') || `<li class="side-empty">${esc(t('noDirect'))}</li>`;
+  $('#list-spaces').innerHTML = spaces.map(item).join('') || `<li class="side-empty">${esc(t('noSpaces'))}</li>`;
+  const total = list.reduce((n, c) => n + (c.id === state.current && isVisible() ? 0 : c.unread || 0), 0);
+  document.title = `${total ? `(${total}) ` : ''}${ORG.name}`;
+}
+
+// Re-render the places that show presence (cheap at this scale).
+function renderPresence(userId) {
+  renderSidebar();
+  if (state.current) renderHeader();
+  if (state.panel === 'members') openMembers();
+  if (userId === ME) {
+    $('#presence-btn .presence-dot').className = `presence-dot ${state.presence[ME] || 'online'}`;
+  }
+}
+
+// ----------------------------------------------------------- conversation
+
+function cacheFor(id) {
+  if (!state.messages.has(id)) state.messages.set(id, { list: [], hasMore: true, loaded: false });
+  return state.messages.get(id);
+}
+
+function showView(name) {
+  state.view = name;
+  for (const v of $$('.view')) v.classList.toggle('active', v.id === `view-${name}`);
+  $('#app').dataset.view = name;
+}
+
+function showEmpty() {
+  state.current = null;
+  closePanel();
+  showView('empty');
+  setUrl(`/o/${ORG.slug}`);
+  renderSidebar();
+}
+
+async function openConversation(id, { push = true } = {}) {
+  const c = state.conversations.get(id);
+  if (!c) return showEmpty();
+  if (state.current !== id) {
+    closePanel();
+    state.staged.main = [];
+    state.markerSeq = c.unread ? c.last_read_seq : null;
+  }
+  state.current = id;
+  showView('conv');
+  if (push) setUrl(`/o/${ORG.slug}/c/${id}`);
+  renderHeader();
+  renderComposer('main');
+  const cache = cacheFor(id);
+  if (!cache.loaded || cache.stale) {
+    $('#msg-list').innerHTML = `<div class="msg-loading"><div class="spinner-border spinner-border-sm"></div></div>`;
+    const data = await api(`${API}/conversations/${id}/messages?limit=50`);
+    if (state.current !== id) return;
+    cache.list = data.messages;
+    cache.hasMore = data.has_more;
+    cache.loaded = true;
+    cache.stale = false;
+  }
+  renderMessages({ scroll: 'bottom' });
+  renderSidebar();
+  markRead();
+  $('#composer-main textarea')?.focus();
+}
+
+function renderHeader() {
+  const c = state.conversations.get(state.current);
+  if (!c) return;
+  $('#conv-name').innerHTML = `${c.type === 'space' ? icon(c.visibility === 'private' ? 'lock' : 'hash') : ''} ${esc(convName(c))}`;
+  let sub = '';
+  if (c.type === 'dm') {
+    const other = (c.member_ids || []).find((uid) => uid !== ME);
+    sub = other ? `${t(`status.${state.presence[other] || 'offline'}`)}${person(other).title ? ` · ${person(other).title}` : ''}` : '';
+  } else {
+    sub = `${t('memberCount', { n: c.member_count })}${c.description ? ` · ${c.description}` : ''}`;
+  }
+  $('#conv-sub').textContent = sub;
+  const canEdit = c.type === 'group' || (c.type === 'space' && (c.my_role === 'moderator' || ['owner', 'admin'].includes(boot.role)));
+  $('#conv-menu').innerHTML = [
+    `<li><button class="dropdown-item" data-action="mute">${icon(c.muted ? 'bell' : 'bell-off')} ${esc(t(c.muted ? 'unmute' : 'mute'))}</button></li>`,
+    canEdit ? `<li><button class="dropdown-item" data-action="rename">${icon('edit')} ${esc(t('rename'))}</button></li>` : '',
+    `<li><button class="dropdown-item" data-action="search-here">${icon('search')} ${esc(t('searchHere'))}</button></li>`,
+    c.type !== 'dm' ? `<li><hr class="dropdown-divider"></li><li><button class="dropdown-item text-danger" data-action="leave">${icon('door')} ${esc(t('leave'))}</button></li>` : '',
+  ].join('');
+  $('[data-action="call"]').hidden = !boot.perms.meetings;
+}
+
+const SAME_AUTHOR_MS = 5 * 60_000;
+
+function messageHtml(m, prev, { thread = false } = {}) {
+  const author = person(m.author_id);
+  const grouped = prev && prev.author_id === m.author_id && prev.kind === m.kind && m.kind === 'text' && Date.parse(m.created_at) - Date.parse(prev.created_at) < SAME_AUTHOR_MS && !prev.deleted_at;
+  const time = timeFmt.format(new Date(m.created_at));
+  const pending = m._pending;
+  let body;
+  if (m.deleted_at) body = `<div class="msg-deleted">${esc(t('messageDeleted'))}</div>`;
+  else if (m.kind === 'meeting') body = meetingCard(m);
+  else body = `<div class="msg-body">${renderMarkdown(m.body, { mention: mentionHtml })}${m.edited_at ? ` <span class="msg-edited">(${esc(t('edited'))})</span>` : ''}</div>`;
+  const files = !m.deleted_at && m.attachments?.length ? `<div class="msg-files">${m.attachments.map(fileHtml).join('')}</div>` : '';
+  const reactions = groupReactions(m.reactions || []);
+  const reactHtml = reactions.length
+    ? `<div class="msg-reactions">${reactions.map((r) => `<button class="reaction${r.mine ? ' mine' : ''}" data-react="${esc(r.emoji)}" title="${esc(r.users.map((u) => person(u).name).join(', '))}">${esc(r.emoji)} <span>${r.users.length}</span></button>`).join('')}</div>`
+    : '';
+  const replies = !thread && m.reply_count ? `<button class="msg-thread-link" data-action="thread">${icon('reply')} ${esc(replyLabel(m.reply_count))}</button>` : '';
+  const actions =
+    pending || m.deleted_at
+      ? ''
+      : `<div class="msg-actions btn-group shadow-sm">
+          ${EMOJI.slice(0, 3).map((e) => `<button class="btn btn-sm" data-react="${e}" title="${e}">${e}</button>`).join('')}
+          <button class="btn btn-sm" data-action="emoji" title="${esc(t('react'))}">${icon('smile')}</button>
+          ${!thread && !m.parent_id ? `<button class="btn btn-sm" data-action="thread" title="${esc(t('replyThread'))}">${icon('reply')}</button>` : ''}
+          ${m.author_id === ME && m.kind === 'text' ? `<button class="btn btn-sm" data-action="edit" title="${esc(t('edit'))}">${icon('edit')}</button>` : ''}
+          <button class="btn btn-sm" data-action="pin" title="${esc(t(m.pinned_at ? 'unpin' : 'pin'))}">${icon('pin')}</button>
+          ${m.author_id === ME || canModerate() ? `<button class="btn btn-sm" data-action="delete" title="${esc(t('delete'))}">${icon('trash')}</button>` : ''}
+        </div>`;
+  const status = pending ? `<span class="msg-status ${m._failed ? 'failed' : ''}">${m._failed ? `${icon('alert')} ${esc(t('sendFailed'))} <button class="btn btn-link btn-sm p-0" data-action="retry">${esc(t('retry'))}</button>` : icon('clock')}</span>` : '';
+  return `<div class="msg${grouped ? ' grouped' : ''}${pending ? ' pending' : ''}${m.pinned_at ? ' pinned' : ''}${m.author_id === ME ? ' mine' : ''}" data-id="${esc(m.id)}" data-cid="${esc(m.client_message_id)}" data-seq="${m.seq || ''}">
+    <div class="msg-gutter">${grouped ? `<span class="msg-time-hover">${esc(time)}</span>` : avatar(m.author_id)}</div>
+    <div class="msg-main">
+      ${grouped ? '' : `<div class="msg-head"><strong>${esc(author.name)}</strong><span class="msg-time" title="${esc(new Date(m.created_at).toLocaleString())}">${esc(time)}</span>${m.pinned_at ? `<span class="msg-pin">${icon('pin')}</span>` : ''}</div>`}
+      ${body}${files}${reactHtml}${replies}${status}
+    </div>
+    ${actions}
+  </div>`;
+}
+
+function meetingCard(m) {
+  const meta = m.meta || {};
+  return `<div class="meeting-card card">
+    <div class="card-body d-flex align-items-center gap-3">
+      <span class="meeting-ic">${icon('video')}</span>
+      <div class="flex-grow-1 min-w-0"><div class="fw-semibold text-truncate">${esc(meta.title || m.body)}</div>
+        <div class="small text-body-secondary">${esc(t('meetingStarted', { name: person(m.author_id).name }))}</div></div>
+      <a class="btn btn-success btn-sm" href="/o/${esc(ORG.slug)}/meet/${esc(meta.meeting_id)}" target="_blank" rel="noopener">${esc(t('joinCall'))}</a>
+    </div>
+  </div>`;
+}
+
+function fileHtml(f) {
+  const url = `${API}/files/${encodeURIComponent(f.id)}`;
+  if (/^image\//.test(f.mime)) return `<a class="msg-image" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${esc(f.name)}" loading="lazy"></a>`;
+  return `<a class="file-chip" href="${url}?download=1">${icon('file')}<span class="text-truncate">${esc(f.name)}</span><small>${fmtSize(f.size)}</small>${icon('download')}</a>`;
+}
+
+const fmtSize = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+
+function groupReactions(list) {
+  const map = new Map();
+  for (const r of list) {
+    if (!map.has(r.emoji)) map.set(r.emoji, { emoji: r.emoji, users: [], mine: false });
+    const g = map.get(r.emoji);
+    g.users.push(r.user_id);
+    if (r.user_id === ME) g.mine = true;
+  }
+  return [...map.values()];
+}
+
+function canModerate() {
+  const c = state.conversations.get(state.current);
+  return c?.type === 'space' && (c.my_role === 'moderator' || ['owner', 'admin'].includes(boot.role));
+}
+
+// Messages of the current conversation: confirmed ones by seq, then the
+// local outbox entries still waiting for their ACK.
+function visibleMessages() {
+  const cache = cacheFor(state.current);
+  const pending = [...state.outbox.values()].filter((p) => p.conversation_id === state.current && !p.parent_id).map(pendingAsMessage);
+  return [...cache.list, ...pending];
+}
+
+function pendingAsMessage(p) {
+  return {
+    id: `pending-${p.client_message_id}`,
+    client_message_id: p.client_message_id,
+    author_id: ME,
+    kind: 'text',
+    body: p.body,
+    created_at: p.created_at,
+    attachments: p.attachments || [],
+    reactions: [],
+    parent_id: p.parent_id,
+    _pending: true,
+    _failed: p.failed,
+  };
+}
+
+function renderMessages({ scroll } = {}) {
+  const box = $('#msg-scroll');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  const prevHeight = box.scrollHeight;
+  const prevTop = box.scrollTop;
+  const list = visibleMessages();
+  const cache = cacheFor(state.current);
+  const c = state.conversations.get(state.current);
+  let html = '';
+  let prev = null;
+  let lastDay = '';
+  let markerShown = false;
+  for (const m of list) {
+    const day = dateFmt.format(new Date(m.created_at));
+    if (day !== lastDay) {
+      html += `<div class="day-sep"><span>${esc(day)}</span></div>`;
+      lastDay = day;
+      prev = null;
+    }
+    if (!markerShown && state.markerSeq !== null && m.seq > state.markerSeq && m.author_id !== ME) {
+      html += `<div class="new-sep"><span>${esc(t('newMessages'))}</span></div>`;
+      markerShown = true;
+    }
+    html += messageHtml(m, prev);
+    prev = m;
+  }
+  $('#msg-top').innerHTML = cache.hasMore ? `<button class="btn btn-sm btn-outline-secondary" data-action="older">${esc(t('loadOlder'))}</button>` : `<div class="conv-start">${convIcon(c || {})}<div><strong>${esc(convName(c))}</strong><div class="small text-body-secondary">${esc(t('conversationStart'))}</div></div></div>`;
+  $('#msg-list').innerHTML = html || `<div class="msg-empty text-body-secondary">${esc(t('noMessages'))}</div>`;
+  renderReadReceipt();
+  if (scroll === 'bottom' || (scroll !== 'keep' && nearBottom)) box.scrollTop = box.scrollHeight;
+  else if (scroll === 'keep') box.scrollTop = prevTop + (box.scrollHeight - prevHeight);
+}
+
+// "Seen" under my last message in a DM.
+function renderReadReceipt() {
+  const c = state.conversations.get(state.current);
+  if (c?.type !== 'dm') return;
+  const other = (c.member_ids || []).find((id) => id !== ME);
+  const seen = state.reads.get(c.id)?.get(other) || 0;
+  const mine = cacheFor(c.id).list.filter((m) => m.author_id === ME && !m.parent_id);
+  const last = mine.at(-1);
+  if (!last || !seen || seen < last.seq) return;
+  const el = $(`.msg[data-id="${CSS.escape(last.id)}"] .msg-main`);
+  if (el) el.insertAdjacentHTML('beforeend', `<span class="msg-seen">${icon('check2')} ${esc(t('seen'))}</span>`);
+}
+
+async function loadOlder() {
+  const cache = cacheFor(state.current);
+  const first = cache.list[0];
+  if (!first) return;
+  const id = state.current;
+  const data = await api(`${API}/conversations/${id}/messages?before=${first.seq}&limit=50`);
+  if (state.current !== id) return;
+  cache.list = [...data.messages, ...cache.list];
+  cache.hasMore = data.has_more;
+  renderMessages({ scroll: 'keep' });
+}
+
+function upsert(list, m) {
+  const i = list.findIndex((x) => x.id === m.id);
+  if (i >= 0) {
+    if ((list[i].version || 0) <= m.version) list[i] = m;
+    return;
+  }
+  let j = list.length;
+  while (j > 0 && list[j - 1].seq > m.seq) j--;
+  list.splice(j, 0, m);
+}
+
+function onMessage(m, created) {
+  // My own message confirmed (possibly from another tab): drop the outbox copy.
+  if (m.author_id === ME && state.outbox.has(m.client_message_id)) {
+    state.outbox.delete(m.client_message_id);
+    saveOutbox();
+  }
+  const c = state.conversations.get(m.conversation_id);
+  if (!c) return refreshConversation(m.conversation_id);
+  if (m.parent_id) {
+    const th = state.threads.get(m.parent_id);
+    if (th) upsert(th.list, m);
+    if (state.thread === m.parent_id) renderThread();
+  } else {
+    const cache = state.messages.get(m.conversation_id);
+    if (cache?.loaded) upsert(cache.list, m);
+  }
+  if (state.thread === m.id) {
+    state.threads.get(m.id).parent = m;
+    renderThread();
+  }
+  if (created) {
+    c.last_seq = Math.max(c.last_seq, m.seq);
+    c.last_message_at = m.created_at;
+    c.last_message = { author_id: m.author_id, body: m.body, kind: m.kind, created_at: m.created_at };
+    const viewing = state.current === m.conversation_id && state.view === 'conv' && isVisible();
+    if (m.author_id !== ME && !viewing) {
+      c.unread = (c.unread || 0) + 1;
+      const mentioned = m.body.includes(`<@${ME}>`);
+      if (mentioned) c.mentions = (c.mentions || 0) + 1;
+      if (!c.muted && (mentioned || c.type === 'dm' || m.kind === 'meeting')) notify(c, m);
+    }
+  }
+  renderSidebar();
+  if (state.current === m.conversation_id && !m.parent_id) {
+    renderMessages();
+    if (created) markRead();
+  }
+}
+
+function onRead(d) {
+  const c = state.conversations.get(d.id);
+  if (!c) return;
+  if (d.user_id === ME) {
+    c.last_read_seq = Math.max(c.last_read_seq || 0, d.seq);
+    if (c.last_read_seq >= c.last_seq) {
+      c.unread = 0;
+      c.mentions = 0;
+    }
+    return renderSidebar();
+  }
+  if (!state.reads.has(d.id)) state.reads.set(d.id, new Map());
+  state.reads.get(d.id).set(d.user_id, d.seq);
+  if (state.current === d.id) renderMessages({ scroll: 'none' });
+}
+
+// Read state is sent when the conversation is on screen, focused, and the
+// newest message has been reached.
+const markRead = debounce(() => {
+  const c = state.conversations.get(state.current);
+  if (!c || state.view !== 'conv' || !isVisible()) return;
+  const box = $('#msg-scroll');
+  if (box.scrollHeight - box.scrollTop - box.clientHeight > 120) return;
+  if ((c.last_read_seq || 0) >= c.last_seq && !c.unread) return;
+  c.unread = 0;
+  c.mentions = 0;
+  c.last_read_seq = c.last_seq;
+  socket.send('conversation.read', { conversation_id: c.id, seq: c.last_seq }) || api(`${API}/conversations/${c.id}/read`, { method: 'POST', body: { seq: c.last_seq } }).catch(() => {});
+  renderSidebar();
+}, 400);
+
+// ------------------------------------------------------------ notifications
+
+function notify(c, m) {
+  if (!('Notification' in window) || Notification.permission !== 'granted' || isVisible()) return;
+  const n = new Notification(m.kind === 'meeting' ? t('callIncoming', { name: person(m.author_id).name }) : `${person(m.author_id).name} · ${convName(c)}`, {
+    body: m.kind === 'meeting' ? m.body : m.body.replace(/<@([A-Za-z0-9_-]+)>/g, (x, id) => `@${person(id).name}`).slice(0, 140),
+    tag: c.id,
+    icon: '/favicon.svg',
+  });
+  n.onclick = () => {
+    window.focus();
+    openConversation(c.id);
+    n.close();
+  };
+}
+
+function askNotifications() {
+  if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+}
+
+// ------------------------------------------------------------------ typing
+
+function onTyping(d) {
+  if (d.user_id === ME) return;
+  if (!state.typing.has(d.conversation_id)) state.typing.set(d.conversation_id, new Map());
+  state.typing.get(d.conversation_id).set(d.user_id, Date.now() + 6000);
+  renderTyping();
+}
+
+function renderTyping() {
+  const map = state.typing.get(state.current);
+  const now = Date.now();
+  const names = map ? [...map].filter(([, until]) => until > now).map(([id]) => person(id).name) : [];
+  $('#typing').innerHTML = names.length ? `<span class="typing-dots"><i></i><i></i><i></i></span> ${esc(names.length > 2 ? t('typingMany') : t('typing', { names: names.join(', ') }))}` : '';
+}
+setInterval(renderTyping, 2000);
+
+let lastTyping = 0;
+function sendTyping(parentId = null) {
+  if (Date.now() - lastTyping < 3000) return;
+  lastTyping = Date.now();
+  socket.send('typing', { conversation_id: state.current, parent_id: parentId });
+}
+
+// ------------------------------------------------------------------ sending
+
+function queueMessage({ conversationId, body, parentId = null, attachments = [] }) {
+  const entry = { client_message_id: randomId(), conversation_id: conversationId, body, parent_id: parentId, attachments, created_at: new Date().toISOString(), failed: false };
+  state.outbox.set(entry.client_message_id, entry);
+  saveOutbox();
+  deliver(entry);
+  if (parentId) renderThread();
+  else renderMessages({ scroll: 'bottom' });
+}
+
+// One outbox entry: WebSocket when connected, HTTP otherwise. Both are
+// idempotent on client_message_id, so retries never duplicate.
+async function deliver(entry) {
+  entry.failed = false;
+  let result = null;
+  if (socket.isOpen()) {
+    const reply = await socket.request('message.send', {
+      conversation_id: entry.conversation_id,
+      client_message_id: entry.client_message_id,
+      body: entry.body,
+      parent_id: entry.parent_id,
+      attachment_ids: entry.attachments.map((a) => a.id),
+    });
+    result = reply?.data || null;
+  } else {
+    try {
+      const data = await api(`${API}/conversations/${entry.conversation_id}/messages`, {
+        method: 'POST',
+        body: { client_message_id: entry.client_message_id, body: entry.body, parent_id: entry.parent_id, attachment_ids: entry.attachments.map((a) => a.id) },
+      });
+      result = { status: 'persisted', message: data.message };
+    } catch (err) {
+      result = err.status && err.status < 500 ? { status: 'failed', error: { code: err.code, message: err.message, details: err.details } } : null;
+    }
+  }
+  if (!state.outbox.has(entry.client_message_id)) return;
+  if (result?.status === 'persisted') {
+    state.outbox.delete(entry.client_message_id);
+    saveOutbox();
+    onMessage(result.message, !result.duplicate);
+    return;
+  }
+  // Rejected by the server (validation, permission): keep it, marked failed.
+  // No answer (offline): it stays queued and is retried after reconnect.
+  if (result?.status === 'failed') {
+    entry.failed = true;
+    toast(errorText(result.error), 'danger');
+  }
+  saveOutbox();
+  if (entry.parent_id) renderThread();
+  else if (state.current === entry.conversation_id) renderMessages();
+}
+
+function flushOutbox() {
+  for (const entry of state.outbox.values()) if (!entry.failed) deliver(entry);
+}
+
+// ----------------------------------------------------------------- composer
+
+function renderComposer(where) {
+  const host = $(where === 'main' ? '#composer-main' : '#composer-thread');
+  const c = state.conversations.get(state.current);
+  const placeholder = where === 'thread' ? t('replyPlaceholder') : t('messagePlaceholder', { name: convName(c) });
+  host.innerHTML = `<form class="composer" data-where="${where}">
+    <div class="staged" data-staged></div>
+    <div class="composer-box">
+      <textarea rows="1" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}" maxlength="10000"></textarea>
+      <div class="composer-tools">
+        <label class="btn btn-icon" title="${esc(t('attach'))}">${icon('paperclip')}<input type="file" multiple hidden data-file></label>
+        <button class="btn btn-icon" type="button" data-action="emoji-insert" title="${esc(t('emoji'))}">${icon('smile')}</button>
+        <button class="btn btn-icon" type="button" data-action="mention-insert" title="${esc(t('mention'))}">@</button>
+        <span class="composer-hint d-none d-md-inline">${esc(t('composerHint'))}</span>
+        <button class="btn btn-primary btn-send ms-auto" type="submit" title="${esc(t('send'))}">${icon('send')}</button>
+      </div>
+    </div>
+    <div class="mention-pop list-group shadow" hidden></div>
+  </form>`;
+  renderStaged(where);
+}
+
+function renderStaged(where) {
+  const host = $(`${where === 'main' ? '#composer-main' : '#composer-thread'} [data-staged]`);
+  if (!host) return;
+  host.innerHTML = state.staged[where]
+    .map((f, i) => `<span class="file-chip staged-chip${f.uploading ? ' uploading' : ''}">${icon('file')}<span class="text-truncate">${esc(f.name)}</span>${f.uploading ? `<span class="spinner-border spinner-border-sm"></span>` : `<small>${fmtSize(f.size)}</small>`}<button type="button" class="btn-close btn-sm" data-unstage="${i}" aria-label="${esc(t('remove'))}"></button></span>`)
+    .join('');
+}
+
+function uploadFile(file, where) {
+  const max = boot.maxUploadMb * 1048576;
+  if (file.size > max) return toast(t('fileTooLarge', { name: file.name, max: boot.maxUploadMb }), 'danger');
+  const entry = { name: file.name, size: file.size, uploading: true };
+  state.staged[where].push(entry);
+  renderStaged(where);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', `${API}/files`);
+  xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+  xhr.onload = () => {
+    let data = null;
+    try {
+      data = JSON.parse(xhr.responseText);
+    } catch {
+      data = null;
+    }
+    if (xhr.status === 200 && data?.file) Object.assign(entry, data.file, { uploading: false });
+    else {
+      state.staged[where] = state.staged[where].filter((f) => f !== entry);
+      toast(data?.error ? errorText(data.error) : t('uploadFailed'), 'danger');
+    }
+    renderStaged(where);
+  };
+  xhr.onerror = () => {
+    state.staged[where] = state.staged[where].filter((f) => f !== entry);
+    renderStaged(where);
+    toast(t('uploadFailed'), 'danger');
+  };
+  xhr.send(file);
+}
+
+function submitComposer(form) {
+  const where = form.dataset.where;
+  const ta = $('textarea', form);
+  const body = ta.value.trim();
+  if (state.staged[where].some((f) => f.uploading)) return toast(t('waitUpload'), 'warning');
+  const attachments = state.staged[where].map(({ id, name, mime, size }) => ({ id, name, mime, size }));
+  if (!body && !attachments.length) return;
+  queueMessage({ conversationId: state.current, body: encodeMentions(body), parentId: where === 'thread' ? state.thread : null, attachments });
+  ta.value = '';
+  autosize(ta);
+  state.staged[where] = [];
+  renderStaged(where);
+}
+
+// "@Name" chosen from the picker is stored as <@id>.
+const mentionMap = new Map();
+function encodeMentions(text) {
+  let out = text;
+  for (const [label, id] of mentionMap) out = out.split(label).join(`<@${id}>`);
+  return out;
+}
+
+function autosize(ta) {
+  ta.style.height = 'auto';
+  ta.style.height = `${Math.min(ta.scrollHeight, 220)}px`;
+}
+
+function mentionCandidates(query) {
+  const c = state.conversations.get(state.current);
+  const ids = c?.type === 'space' ? [...state.directory.keys()] : c?.member_ids || [];
+  const q = query.toLowerCase();
+  return ids
+    .filter((id) => id !== ME)
+    .map(person)
+    .filter((p) => p.name.toLowerCase().includes(q) || p.email?.toLowerCase().includes(q))
+    .slice(0, 6);
+}
+
+function updateMentionPop(form) {
+  const ta = $('textarea', form);
+  const pop = $('.mention-pop', form);
+  const before = ta.value.slice(0, ta.selectionStart);
+  const match = before.match(/(?:^|\s)@([\p{L}\p{N}._-]{0,30})$/u);
+  if (!match) {
+    pop.hidden = true;
+    return;
+  }
+  const list = mentionCandidates(match[1]);
+  if (!list.length) {
+    pop.hidden = true;
+    return;
+  }
+  pop.hidden = false;
+  pop.innerHTML = list.map((p, i) => `<button type="button" class="list-group-item list-group-item-action d-flex align-items-center gap-2${i === 0 ? ' active' : ''}" data-mention="${esc(p.id)}">${avatar(p.id, 'avatar-sm')} ${esc(p.name)} <small class="text-body-secondary ms-auto">${esc(p.email || '')}</small></button>`).join('');
+}
+
+function insertMention(form, id) {
+  const ta = $('textarea', form);
+  const p = person(id);
+  const label = `@${p.name}`;
+  mentionMap.set(label, id);
+  const before = ta.value.slice(0, ta.selectionStart).replace(/@([\p{L}\p{N}._-]{0,30})$/u, `${label} `);
+  ta.value = before + ta.value.slice(ta.selectionStart);
+  ta.selectionStart = ta.selectionEnd = before.length;
+  $('.mention-pop', form).hidden = true;
+  ta.focus();
+}
+
+// --------------------------------------------------------- message actions
+
+function findMessage(id) {
+  for (const cache of state.messages.values()) {
+    const m = cache.list.find((x) => x.id === id);
+    if (m) return m;
+  }
+  for (const th of state.threads.values()) {
+    if (th.parent?.id === id) return th.parent;
+    const m = th.list.find((x) => x.id === id);
+    if (m) return m;
+  }
+  return null;
+}
+
+async function messageAction(action, el, value) {
+  const id = el.closest('.msg')?.dataset.id;
+  const m = id && findMessage(id);
+  const base = m ? `${API}/conversations/${m.conversation_id}/messages/${m.id}` : '';
+  try {
+    if (action === 'react') return await api(`${base}/react`, { method: 'POST', body: { emoji: value } });
+    if (action === 'thread') return openThread(m.id);
+    if (action === 'pin') return await api(`${base}/pin`, { method: 'POST', body: { pinned: !m.pinned_at } });
+    if (action === 'delete') {
+      if (!(await confirmBox(t('deleteConfirm')))) return;
+      return await api(`${base}/delete`, { method: 'POST', body: {} });
+    }
+    if (action === 'edit') return startEdit(el.closest('.msg'), m);
+    if (action === 'emoji') return emojiPicker(el, (emoji) => api(`${base}/react`, { method: 'POST', body: { emoji } }).catch((err) => toast(errorText(err), 'danger')));
+    if (action === 'retry') {
+      const entry = state.outbox.get(el.closest('.msg').dataset.cid);
+      if (entry) deliver(entry);
+    }
+  } catch (err) {
+    toast(errorText(err), 'danger');
+  }
+}
+
+function startEdit(node, m) {
+  const bodyEl = $('.msg-body', node);
+  if (!bodyEl || node.classList.contains('editing')) return;
+  node.classList.add('editing');
+  const text = m.body.replace(/<@([A-Za-z0-9_-]+)>/g, (x, id) => {
+    const label = `@${person(id).name}`;
+    mentionMap.set(label, id);
+    return label;
+  });
+  bodyEl.outerHTML = `<form class="edit-form"><textarea class="form-control" rows="2">${esc(text)}</textarea>
+    <div class="mt-1 d-flex gap-2"><button class="btn btn-sm btn-primary">${esc(t('save'))}</button><button type="button" class="btn btn-sm btn-outline-secondary" data-action="cancel-edit">${esc(t('cancel'))}</button><small class="text-body-secondary align-self-center">${esc(t('editHint'))}</small></div></form>`;
+  const form = $('.edit-form', node);
+  const ta = $('textarea', form);
+  ta.focus();
+  ta.selectionStart = ta.value.length;
+  const done = () => (m.parent_id || state.thread === m.id ? renderThread() : renderMessages({ scroll: 'none' }));
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api(`${API}/conversations/${m.conversation_id}/messages/${m.id}/edit`, { method: 'POST', body: { body: encodeMentions(ta.value), version: m.version } });
+    } catch (err) {
+      toast(errorText(err), 'danger');
+      done();
+    }
+  };
+  ta.onkeydown = (e) => {
+    if (e.key === 'Escape') done();
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  };
+  $('[data-action="cancel-edit"]', form).onclick = done;
+}
+
+function emojiPicker(anchor, onPick) {
+  document.querySelector('.emoji-pop')?.remove();
+  const pop = document.createElement('div');
+  pop.className = 'emoji-pop card shadow';
+  pop.innerHTML = EMOJI.map((e) => `<button type="button" class="btn btn-sm" data-emoji="${e}">${e}</button>`).join('');
+  document.body.append(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.top = `${Math.max(8, r.top - pop.offsetHeight - 6)}px`;
+  pop.style.left = `${Math.min(window.innerWidth - pop.offsetWidth - 8, r.left)}px`;
+  pop.onclick = (e) => {
+    const b = e.target.closest('[data-emoji]');
+    if (b) onPick(b.dataset.emoji);
+    pop.remove();
+  };
+  setTimeout(() => document.addEventListener('click', () => pop.remove(), { once: true }), 0);
+}
+
+// ------------------------------------------------------------------- panel
+
+function openPanel(kind, title) {
+  state.panel = kind;
+  $('#panel').hidden = false;
+  $('#panel-title').textContent = title;
+  $('#composer-thread').innerHTML = '';
+  $('#app').classList.add('with-panel');
+}
+
+function closePanel() {
+  state.panel = null;
+  state.thread = null;
+  $('#panel').hidden = true;
+  $('#app').classList.remove('with-panel');
+}
+
+async function openThread(parentId) {
+  state.thread = parentId;
+  openPanel('thread', t('thread'));
+  $('#panel-body').innerHTML = `<div class="msg-loading"><div class="spinner-border spinner-border-sm"></div></div>`;
+  const c = state.conversations.get(state.current);
+  const data = await api(`${API}/conversations/${c.id}/messages?parent=${encodeURIComponent(parentId)}&limit=200`);
+  if (state.thread !== parentId) return;
+  state.threads.set(parentId, { parent: data.parent, list: data.messages });
+  state.staged.thread = [];
+  renderComposer('thread');
+  renderThread();
+  $('#composer-thread textarea')?.focus();
+}
+
+function renderThread() {
+  if (state.panel !== 'thread' || !state.thread) return;
+  const th = state.threads.get(state.thread);
+  if (!th) return;
+  const pending = [...state.outbox.values()].filter((p) => p.parent_id === state.thread).map(pendingAsMessage);
+  let prev = null;
+  const replies = [...th.list, ...pending].map((m) => {
+    const html = messageHtml(m, prev, { thread: true });
+    prev = m;
+    return html;
+  });
+  const body = $('#panel-body');
+  const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+  body.innerHTML = `<div class="thread-parent">${th.parent ? messageHtml(th.parent, null, { thread: true }) : ''}</div>
+    <div class="thread-count">${esc(replyLabel(th.list.length))}</div>
+    <div class="thread-list">${replies.join('')}</div>`;
+  if (atBottom) body.scrollTop = body.scrollHeight;
+}
+
+async function openMembers() {
+  const c = state.conversations.get(state.current);
+  if (!c) return;
+  openPanel('members', t('members'));
+  const { members } = await api(`${API}/conversations/${c.id}/members`);
+  const moderator = canModerate();
+  const canAdd = c.type === 'group' || (c.type === 'space' && (c.visibility === 'public' || moderator));
+  $('#panel-body').innerHTML = `${canAdd ? `<button class="btn btn-outline-primary btn-sm w-100 mb-3" data-action="add-members">${icon('user-plus')} ${esc(t('addPeople'))}</button>` : ''}
+    <ul class="list-unstyled member-list">${members
+      .map(
+        (m) => `<li class="d-flex align-items-center gap-2 py-1" data-user="${esc(m.id)}">${avatar(m.id, 'avatar-sm')}
+        <div class="min-w-0 flex-grow-1"><div class="text-truncate">${esc(m.name)}${m.id === ME ? ` <small class="text-body-secondary">(${esc(t('you'))})</small>` : ''}</div><small class="text-body-secondary">${esc(m.role === 'moderator' ? t('moderator') : t(`status.${state.presence[m.id] || 'offline'}`))}</small></div>
+        ${m.id !== ME ? `<button class="btn btn-sm btn-icon" data-action="dm-user" title="${esc(t('message'))}">${icon('chat')}</button>` : ''}
+        ${moderator && m.id !== ME ? `<div class="dropdown"><button class="btn btn-sm btn-icon" data-bs-toggle="dropdown">${icon('more')}</button><ul class="dropdown-menu dropdown-menu-end">
+          <li><button class="dropdown-item" data-action="toggle-mod">${esc(t(m.role === 'moderator' ? 'removeModerator' : 'makeModerator'))}</button></li>
+          <li><button class="dropdown-item text-danger" data-action="remove-member">${esc(t('removeFromSpace'))}</button></li></ul></div>` : ''}
+      </li>`
+      )
+      .join('')}</ul>`;
+}
+
+async function openPinned() {
+  const c = state.conversations.get(state.current);
+  openPanel('pinned', t('pinned'));
+  const { messages } = await api(`${API}/conversations/${c.id}/pinned`);
+  $('#panel-body').innerHTML = messages.length ? messages.map((m) => messageHtml(m, null, { thread: true })).join('') : `<div class="text-body-secondary text-center py-4">${esc(t('noPinned'))}</div>`;
+}
+
+// ------------------------------------------------------------------- modals
+
+const modalEl = $('#modal');
+let modal = null;
+const getModal = () => (modal ||= window.bootstrap.Modal.getOrCreateInstance(modalEl));
+
+function openModal(html, onReady) {
+  $('#modal-content').innerHTML = html;
+  getModal().show();
+  onReady?.($('#modal-content'));
+}
+
+const closeModal = () => getModal().hide();
+
+function confirmBox(text) {
+  return new Promise((resolve) => {
+    openModal(
+      `<div class="modal-body p-4"><p class="mb-4">${esc(text)}</p><div class="d-flex justify-content-end gap-2">
+        <button class="btn btn-outline-secondary" data-answer="0">${esc(t('cancel'))}</button><button class="btn btn-danger" data-answer="1">${esc(t('confirm'))}</button></div></div>`,
+      (root) => {
+        let answered = false;
+        root.onclick = (e) => {
+          const b = e.target.closest('[data-answer]');
+          if (!b) return;
+          answered = true;
+          closeModal();
+          resolve(b.dataset.answer === '1');
+        };
+        modalEl.addEventListener('hidden.bs.modal', () => answered || resolve(false), { once: true });
+      }
+    );
+  });
+}
+
+// People picker used by new DM / group / space / meeting / add members.
+function pickerHtml({ multi, exclude = [] }) {
+  const people = [...state.directory.values()].filter((p) => p.id !== ME && !exclude.includes(p.id)).sort((a, b) => a.name.localeCompare(b.name));
+  return `<input class="form-control mb-2" type="search" placeholder="${esc(t('searchPeople'))}" data-filter>
+    <div class="picked mb-2" data-picked></div>
+    <div class="list-group picker-list">${people
+      .map(
+        (p) => `<label class="list-group-item d-flex align-items-center gap-2" data-name="${esc(`${p.name} ${p.email}`.toLowerCase())}">
+        <input class="form-check-input m-0" type="${multi ? 'checkbox' : 'radio'}" name="people" value="${esc(p.id)}">
+        ${avatar(p.id, 'avatar-sm')}<span class="min-w-0"><span class="d-block text-truncate">${esc(p.name)}</span><small class="text-body-secondary">${esc(p.title || p.email)}</small></span></label>`
+      )
+      .join('') || `<div class="text-body-secondary p-3">${esc(t('noPeople'))}</div>`}</div>`;
+}
+
+function wirePicker(root) {
+  const filter = $('[data-filter]', root);
+  if (!filter) return;
+  filter.oninput = () => {
+    const q = filter.value.trim().toLowerCase();
+    for (const row of $$('.picker-list label', root)) row.hidden = q && !row.dataset.name.includes(q);
+  };
+  root.addEventListener('change', () => {
+    $('[data-picked]', root).innerHTML = $$('input[name="people"]:checked', root)
+      .map((i) => `<span class="badge text-bg-primary me-1">${esc(person(i.value).name)}</span>`)
+      .join('');
+  });
+}
+
+const picked = (root) => $$('input[name="people"]:checked', root).map((i) => i.value);
+
+function modalShell(title, body, submitLabel) {
+  return `<form class="modal-form"><div class="modal-header"><h2 class="modal-title h5">${esc(title)}</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="${esc(t('close'))}"></button></div>
+    <div class="modal-body">${body}<div class="alert alert-danger py-2 mt-3 mb-0" data-error hidden></div></div>
+    <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">${esc(t('cancel'))}</button><button class="btn btn-primary">${esc(submitLabel)}</button></div></form>`;
+}
+
+function onModalSubmit(root, handler) {
+  const form = $('form', root);
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const err = $('[data-error]', root);
+    err.hidden = true;
+    const btn = $('.modal-footer .btn-primary', root);
+    btn.disabled = true;
+    try {
+      await handler(form);
+      closeModal();
+    } catch (ex) {
+      err.textContent = errorText(ex);
+      err.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+async function adopt(conversation) {
+  state.conversations.set(conversation.id, { ...conversation, unread: 0, mentions: 0 });
+  renderSidebar();
+  await openConversation(conversation.id);
+}
+
+const modals = {
+  'new-dm': () =>
+    openModal(modalShell(t('newDm'), pickerHtml({ multi: false }), t('open')), (root) => {
+      wirePicker(root);
+      onModalSubmit(root, async () => {
+        const [id] = picked(root);
+        if (!id) throw new Error(t('pickSomeone'));
+        await adopt((await api(`${API}/dms`, { method: 'POST', body: { user_id: id } })).conversation);
+      });
+    }),
+  'new-group': () =>
+    openModal(modalShell(t('newGroup'), `<input class="form-control mb-3" name="name" maxlength="80" placeholder="${esc(t('groupNameOptional'))}">${pickerHtml({ multi: true })}`, t('create')), (root) => {
+      wirePicker(root);
+      onModalSubmit(root, async (form) => {
+        const ids = picked(root);
+        if (!ids.length) throw new Error(t('pickSomeone'));
+        await adopt((await api(`${API}/groups`, { method: 'POST', body: { user_ids: ids, name: form.name.value } })).conversation);
+      });
+    }),
+  'new-space': () =>
+    openModal(
+      modalShell(
+        t('newSpace'),
+        `<div class="mb-3"><label class="form-label">${esc(t('spaceName'))}</label><input class="form-control" name="name" maxlength="80" required></div>
+        <div class="mb-3"><label class="form-label">${esc(t('description'))}</label><textarea class="form-control" name="description" rows="2" maxlength="500"></textarea></div>
+        <div class="mb-3"><div class="form-check"><input class="form-check-input" type="radio" name="visibility" value="public" id="v-pub" checked><label class="form-check-label" for="v-pub">${icon('hash')} ${esc(t('visibility.public'))} <small class="text-body-secondary d-block">${esc(t('visibilityPublicHelp'))}</small></label></div>
+        <div class="form-check"><input class="form-check-input" type="radio" name="visibility" value="private" id="v-priv"><label class="form-check-label" for="v-priv">${icon('lock')} ${esc(t('visibility.private'))} <small class="text-body-secondary d-block">${esc(t('visibilityPrivateHelp'))}</small></label></div></div>
+        <label class="form-label">${esc(t('addPeople'))}</label>${pickerHtml({ multi: true })}`,
+        t('create')
+      ),
+      (root) => {
+        wirePicker(root);
+        onModalSubmit(root, async (form) => {
+          const body = { name: form.name.value, description: form.description.value, visibility: form.visibility.value, user_ids: picked(root) };
+          await adopt((await api(`${API}/spaces`, { method: 'POST', body })).conversation);
+        });
+      }
+    ),
+  'browse-spaces': async () => {
+    const { spaces } = await api(`${API}/spaces`);
+    openModal(
+      `<div class="modal-header"><h2 class="modal-title h5">${esc(t('browseSpaces'))}</h2><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body"><div class="list-group">${spaces
+        .map(
+          (s) => `<div class="list-group-item d-flex align-items-center gap-3"><span class="conv-ic space">${icon('hash')}</span>
+          <div class="flex-grow-1 min-w-0"><div class="fw-semibold">${esc(s.name)}</div><small class="text-body-secondary">${esc(t('memberCount', { n: s.member_count }))}${s.description ? ` · ${esc(s.description)}` : ''}</small></div>
+          ${s.joined ? `<button class="btn btn-sm btn-outline-secondary" data-open="${esc(s.id)}">${esc(t('open'))}</button>` : `<button class="btn btn-sm btn-primary" data-join="${esc(s.id)}">${esc(t('join'))}</button>`}</div>`
+        )
+        .join('') || `<div class="text-body-secondary p-3">${esc(t('noPublicSpaces'))}</div>`}</div></div>`,
+      (root) => {
+        root.onclick = async (e) => {
+          const join = e.target.closest('[data-join]');
+          const open = e.target.closest('[data-open]');
+          if (join) {
+            closeModal();
+            await adopt((await api(`${API}/spaces/${join.dataset.join}/join`, { method: 'POST', body: {} })).conversation);
+          } else if (open) {
+            closeModal();
+            openConversation(open.dataset.open);
+          }
+        };
+      }
+    );
+  },
+  'new-meeting': (preset = {}) => {
+    const local = new Date(Date.now() + 3600_000);
+    local.setMinutes(0, 0, 0);
+    const value = new Date(local.getTime() - local.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+    openModal(
+      modalShell(
+        t('newMeeting'),
+        `<div class="mb-3"><label class="form-label">${esc(t('meetingTitle'))}</label><input class="form-control" name="title" maxlength="120" required value="${esc(preset.title || '')}"></div>
+        <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="m-now" name="now" checked><label class="form-check-label" for="m-now">${esc(t('startNow'))}</label></div>
+        <div class="row g-2 mb-3" data-when hidden><div class="col-7"><input class="form-control" type="datetime-local" name="when" value="${value}"></div>
+          <div class="col-5"><select class="form-select" name="duration">${[15, 30, 45, 60, 90, 120].map((m) => `<option value="${m}"${m === 60 ? ' selected' : ''}>${m} min</option>`).join('')}</select></div></div>
+        <label class="form-label">${esc(t('inviteColleagues'))}</label>${pickerHtml({ multi: true })}
+        <label class="form-label mt-3">${esc(t('inviteGuests'))}</label>
+        <textarea class="form-control" name="guests" rows="2" placeholder="ana@partener.ro, Ion Pop &lt;ion@client.com&gt;"></textarea>
+        <div class="form-text">${esc(t('guestsHelp'))}</div>`,
+        t('create')
+      ),
+      (root) => {
+        wirePicker(root);
+        const form = $('form', root);
+        form.now.onchange = () => ($('[data-when]', root).hidden = form.now.checked);
+        onModalSubmit(root, async () => {
+          const guests = form.guests.value
+            .split(/[,;\n]+/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((s) => {
+              const m = s.match(/^(.*?)\s*<([^>]+)>$/);
+              return m ? { name: m[1].trim(), email: m[2].trim() } : { email: s };
+            });
+          const body = { title: form.title.value, user_ids: picked(root), guests, duration_min: Number(form.duration.value) };
+          if (!form.now.checked) body.scheduled_at = new Date(form.when.value).toISOString();
+          const { meeting } = await api(`${API}/meetings`, { method: 'POST', body });
+          if (form.now.checked) window.open(`/o/${ORG.slug}/meet/${meeting.id}`, '_blank', 'noopener');
+          if (state.view === 'meetings') renderMeetings();
+          toast(t('meetingCreated'), 'success');
+        });
+      }
+    );
+  },
+  'add-members': () => {
+    const c = state.conversations.get(state.current);
+    openModal(modalShell(t('addPeople'), pickerHtml({ multi: true, exclude: c.member_ids || [] }), t('add')), (root) => {
+      wirePicker(root);
+      onModalSubmit(root, async () => {
+        const ids = picked(root);
+        if (!ids.length) throw new Error(t('pickSomeone'));
+        await api(`${API}/conversations/${c.id}/members`, { method: 'POST', body: { user_ids: ids } });
+      });
+    });
+  },
+  rename: () => {
+    const c = state.conversations.get(state.current);
+    openModal(
+      modalShell(
+        t('rename'),
+        `<div class="mb-3"><label class="form-label">${esc(t('name'))}</label><input class="form-control" name="name" maxlength="80" value="${esc(c.name || '')}"></div>
+        ${c.type === 'space' ? `<div><label class="form-label">${esc(t('description'))}</label><textarea class="form-control" name="description" rows="2" maxlength="500">${esc(c.description || '')}</textarea></div>` : ''}`,
+        t('save')
+      ),
+      (root) =>
+        onModalSubmit(root, async (form) => {
+          await api(`${API}/conversations/${c.id}/update`, { method: 'POST', body: { name: form.name.value, description: form.description?.value } });
+        })
+    );
+  },
+};
+
+// ---------------------------------------------------------------- meetings
+
+async function renderMeetings() {
+  showView('meetings');
+  setUrl(`/o/${ORG.slug}/meetings`);
+  const body = $('#meetings-body');
+  body.innerHTML = `<div class="msg-loading"><div class="spinner-border spinner-border-sm"></div></div>`;
+  const { meetings } = await api(`${API}/meetings`);
+  const card = (m) => {
+    const when = new Date(m.scheduled_at);
+    const badge = !m.open ? `<span class="badge text-bg-secondary">${esc(t(`meetingState.${m.state === 'canceled' ? 'canceled' : 'ended'}`))}</span>` : m.state === 'live' ? `<span class="badge text-bg-danger">${esc(t('meetingState.live'))} · ${m.live_count}</span>` : `<span class="badge text-bg-primary">${esc(t(`meetingState.${m.state}`))}</span>`;
+    return `<div class="card meeting-row mb-2" data-meeting="${esc(m.id)}"><div class="card-body d-flex flex-wrap align-items-center gap-3">
+      <div class="meeting-date text-center"><div class="small text-uppercase">${esc(shortFmt.format(when))}</div><div class="fw-semibold">${esc(timeFmt.format(when))}</div></div>
+      <div class="flex-grow-1 min-w-0"><div class="fw-semibold text-truncate">${esc(m.title)} ${badge}</div><small class="text-body-secondary">${esc(t('hostedBy', { name: m.host_name || '—' }))} · ${m.duration_min} min</small></div>
+      <div class="d-flex gap-2">
+        ${m.open ? `<a class="btn btn-success btn-sm" href="/o/${esc(ORG.slug)}/meet/${esc(m.id)}" target="_blank" rel="noopener">${icon('video')} ${esc(t('joinCall'))}</a>
+        <button class="btn btn-outline-secondary btn-sm" data-copy="${esc(m.url)}" title="${esc(t('copyLink'))}">${icon('link')}</button>` : ''}
+        ${m.can_manage && m.open ? `<button class="btn btn-outline-secondary btn-sm" data-manage="${esc(m.id)}">${icon('settings')}</button>` : ''}
+      </div></div></div>`;
+  };
+  body.innerHTML = meetings.length ? meetings.map(card).join('') : `<div class="empty-hero">${icon('calendar', 'hero-ic')}<p class="text-body-secondary">${esc(t('noMeetings'))}</p></div>`;
+}
+
+async function manageMeeting(id) {
+  const data = await api(`${API}/meetings/${id}`);
+  const m = data.meeting;
+  const invRow = (i) => `<li class="list-group-item d-flex align-items-center gap-2">
+    <div class="min-w-0 flex-grow-1"><div class="text-truncate">${esc(i.user_name || i.name || i.email)}</div><small class="text-body-secondary">${esc(i.email || t('colleague'))} · ${esc(i.revoked_at ? t('revoked') : i.verified_at ? t('verified') : t('invited'))}</small></div>
+    ${i.revoked_at ? '' : `<button class="btn btn-sm btn-outline-danger" data-revoke="${esc(i.id)}">${esc(t('revoke'))}</button>`}</li>`;
+  openModal(
+    `<div class="modal-header"><h2 class="modal-title h5">${esc(m.title)}</h2><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+      <h3 class="h6">${esc(t('invitations'))}</h3>
+      <ul class="list-group mb-3">${data.invitations.map(invRow).join('') || `<li class="list-group-item text-body-secondary">${esc(t('noInvitations'))}</li>`}</ul>
+      <form class="d-flex gap-2" data-invite><input class="form-control form-control-sm" type="email" name="email" placeholder="email@firma.ro" required><button class="btn btn-sm btn-primary text-nowrap">${icon('mail')} ${esc(t('invite'))}</button></form>
+      <div class="alert alert-danger py-2 mt-3 mb-0" data-error hidden></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-outline-danger me-auto" data-cancel-meeting>${esc(t(m.state === 'scheduled' ? 'cancelMeeting' : 'endMeeting'))}</button><button class="btn btn-outline-secondary" data-bs-dismiss="modal">${esc(t('close'))}</button></div>`,
+    (root) => {
+      const fail = (err) => {
+        const box = $('[data-error]', root);
+        box.textContent = errorText(err);
+        box.hidden = false;
+      };
+      $('[data-invite]', root).onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+          await api(`${API}/meetings/${id}/invitations`, { method: 'POST', body: { email: e.target.email.value } });
+          manageMeeting(id);
+        } catch (err) {
+          fail(err);
+        }
+      };
+      root.addEventListener('click', async (e) => {
+        const revoke = e.target.closest('[data-revoke]');
+        try {
+          if (revoke) {
+            await api(`${API}/meetings/${id}/invitations/${revoke.dataset.revoke}/revoke`, { method: 'POST', body: {} });
+            manageMeeting(id);
+          } else if (e.target.closest('[data-cancel-meeting]')) {
+            if (!(await confirmBox(t('endMeetingConfirm')))) return;
+            await api(`${API}/meetings/${id}/${m.state === 'scheduled' ? 'cancel' : 'end'}`, { method: 'POST', body: {} });
+            renderMeetings();
+          }
+        } catch (err) {
+          fail(err);
+        }
+      });
+    }
+  );
+}
+
+// ------------------------------------------------------------------ search
+
+async function runSearch(params) {
+  showView('search');
+  const form = $('#search-filters');
+  for (const [k, v] of Object.entries(params)) if (form[k]) form[k].value = v;
+  const convSel = form.conversation;
+  if (convSel.options.length <= 1) {
+    for (const c of state.conversations.values()) convSel.add(new Option(convName(c), c.id));
+    for (const p of state.directory.values()) form.author.add(new Option(p.name, p.id));
+    if (params.conversation) convSel.value = params.conversation;
+  }
+  const q = form.q.value.trim();
+  const out = $('#search-results');
+  if (!q) {
+    out.innerHTML = '';
+    return;
+  }
+  out.innerHTML = `<div class="msg-loading"><div class="spinner-border spinner-border-sm"></div></div>`;
+  const qs = new URLSearchParams({ q, conversation: form.conversation.value, author: form.author.value });
+  if (form.from.value) qs.set('from', new Date(form.from.value).toISOString());
+  if (form.to.value) qs.set('to', new Date(new Date(form.to.value).getTime() + 86400_000).toISOString());
+  const data = await api(`${API}/search?${qs}`);
+  const snippet = (s) => esc(s).replace(/\[\[/g, '<mark>').replace(/\]\]/g, '</mark>').replace(/&lt;@([A-Za-z0-9_-]+)&gt;/g, (m, id) => `@${esc(person(id).name)}`);
+  out.innerHTML =
+    (data.files.length ? `<h3 class="h6 mt-2">${esc(t('files'))}</h3><div class="d-flex flex-wrap gap-2 mb-3">${data.files.map(fileHtml).join('')}</div>` : '') +
+    `<h3 class="h6">${esc(t('messages'))}</h3>` +
+    (data.messages
+      .map((m) => {
+        const c = state.conversations.get(m.conversation_id);
+        return `<a class="search-hit card mb-2" href="/o/${esc(ORG.slug)}/c/${esc(m.conversation_id)}" data-conv="${esc(m.conversation_id)}"><div class="card-body py-2">
+          <div class="small text-body-secondary">${esc(convName(c))} · ${esc(person(m.author_id).name)} · ${esc(new Date(m.created_at).toLocaleString())}</div>
+          <div>${snippet(m.snippet)}</div></div></a>`;
+      })
+      .join('') || `<div class="text-body-secondary">${esc(t('noResults'))}</div>`);
+}
+
+// -------------------------------------------------------------- dom events
+
+document.addEventListener('click', async (e) => {
+  const el = e.target.closest('[data-action], [data-conv], [data-react], [data-view], [data-presence], [data-mention], [data-unstage], [data-copy], [data-manage]');
+  if (!el) return;
+  if (el.dataset.conv && el.tagName === 'A') {
+    if (e.ctrlKey || e.metaKey) return;
+    e.preventDefault();
+    return openConversation(el.dataset.conv);
+  }
+  if (el.dataset.react) return messageAction('react', el, el.dataset.react);
+  if (el.dataset.view === 'meetings') return renderMeetings();
+  if (el.dataset.presence) {
+    localStorage.setItem('presence', el.dataset.presence);
+    state.presence[ME] = el.dataset.presence;
+    socket.send('presence.set', { status: el.dataset.presence });
+    return renderPresence(ME);
+  }
+  if (el.dataset.mention) return insertMention(el.closest('form'), el.dataset.mention);
+  if (el.dataset.unstage !== undefined) {
+    const where = el.closest('form').dataset.where;
+    state.staged[where].splice(Number(el.dataset.unstage), 1);
+    return renderStaged(where);
+  }
+  if (el.dataset.copy) {
+    await navigator.clipboard.writeText(el.dataset.copy).catch(() => {});
+    return toast(t('linkCopied'), 'success');
+  }
+  if (el.dataset.manage) return manageMeeting(el.dataset.manage);
+  const action = el.dataset.action;
+  const c = state.conversations.get(state.current);
+  switch (action) {
+    case 'thread':
+    case 'pin':
+    case 'delete':
+    case 'edit':
+    case 'emoji':
+    case 'retry':
+      return messageAction(action, el);
+    case 'older':
+      return loadOlder();
+    case 'members':
+      return state.panel === 'members' ? closePanel() : openMembers();
+    case 'pinned':
+      return state.panel === 'pinned' ? closePanel() : openPinned();
+    case 'close-panel':
+      return closePanel();
+    case 'back':
+      return showEmpty();
+    case 'close-search':
+      return state.current ? openConversation(state.current) : showEmpty();
+    case 'call': {
+      if (!c) return;
+      try {
+        const { meeting } = await api(`${API}/meetings`, { method: 'POST', body: { conversation_id: c.id, notify_members: false } });
+        window.open(`/o/${ORG.slug}/meet/${meeting.id}`, '_blank', 'noopener');
+      } catch (err) {
+        toast(errorText(err), 'danger');
+      }
+      return;
+    }
+    case 'mute':
+      await api(`${API}/conversations/${c.id}/mute`, { method: 'POST', body: { muted: !c.muted } });
+      c.muted = !c.muted;
+      renderHeader();
+      return renderSidebar();
+    case 'leave':
+      if (!(await confirmBox(t('leaveConfirm', { name: convName(c) })))) return;
+      try {
+        await api(`${API}/conversations/${c.id}/members/${ME}/remove`, { method: 'POST', body: {} });
+        dropConversation(c.id);
+      } catch (err) {
+        toast(errorText(err), 'danger');
+      }
+      return;
+    case 'search-here':
+      return runSearch({ conversation: c.id, q: '' });
+    case 'dm-user': {
+      const uid = el.closest('[data-user]').dataset.user;
+      return adopt((await api(`${API}/dms`, { method: 'POST', body: { user_id: uid } })).conversation);
+    }
+    case 'toggle-mod':
+    case 'remove-member': {
+      const uid = el.closest('[data-user]').dataset.user;
+      try {
+        if (action === 'remove-member') await api(`${API}/conversations/${c.id}/members/${uid}/remove`, { method: 'POST', body: {} });
+        else {
+          const row = (await api(`${API}/conversations/${c.id}/members`)).members.find((m) => m.id === uid);
+          await api(`${API}/conversations/${c.id}/members/${uid}/role`, { method: 'POST', body: { role: row?.role === 'moderator' ? 'member' : 'moderator' } });
+        }
+        openMembers();
+      } catch (err) {
+        toast(errorText(err), 'danger');
+      }
+      return;
+    }
+    case 'emoji-insert': {
+      const ta = $('textarea', el.closest('form'));
+      return emojiPicker(el, (emoji) => {
+        ta.setRangeText(emoji, ta.selectionStart, ta.selectionEnd, 'end');
+        ta.focus();
+      });
+    }
+    case 'mention-insert': {
+      const ta = $('textarea', el.closest('form'));
+      ta.setRangeText('@', ta.selectionStart, ta.selectionEnd, 'end');
+      ta.focus();
+      return updateMentionPop(el.closest('form'));
+    }
+    default:
+      if (modals[action]) {
+        askNotifications();
+        return modals[action]();
+      }
+  }
+});
+
+document.addEventListener('submit', (e) => {
+  const form = e.target.closest('.composer');
+  if (form) {
+    e.preventDefault();
+    submitComposer(form);
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  const ta = e.target.closest?.('.composer textarea');
+  if (!ta) return;
+  const form = ta.closest('form');
+  const pop = $('.mention-pop', form);
+  if (!pop.hidden && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+    const items = $$('[data-mention]', pop);
+    const i = items.findIndex((b) => b.classList.contains('active'));
+    if (e.key === 'Escape') pop.hidden = true;
+    else if (e.key === 'Enter' || e.key === 'Tab') insertMention(form, items[Math.max(0, i)].dataset.mention);
+    else {
+      items[i]?.classList.remove('active');
+      items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].classList.add('active');
+    }
+    e.preventDefault();
+    return;
+  }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    form.requestSubmit();
+  } else if (e.key === 'ArrowUp' && !ta.value && form.dataset.where === 'main') {
+    // Edit my last message, like most chat apps.
+    const mine = cacheFor(state.current).list.filter((m) => m.author_id === ME && m.kind === 'text' && !m.deleted_at).at(-1);
+    const node = mine && $(`.msg[data-id="${CSS.escape(mine.id)}"]`);
+    if (node) {
+      e.preventDefault();
+      startEdit(node, mine);
+    }
+  }
+});
+
+document.addEventListener('input', (e) => {
+  const ta = e.target.closest?.('.composer textarea');
+  if (!ta) return;
+  autosize(ta);
+  updateMentionPop(ta.closest('form'));
+  if (ta.value) sendTyping(ta.closest('form').dataset.where === 'thread' ? state.thread : null);
+});
+
+document.addEventListener('change', (e) => {
+  const input = e.target.closest?.('[data-file]');
+  if (!input) return;
+  const where = input.closest('form').dataset.where;
+  for (const file of input.files) uploadFile(file, where);
+  input.value = '';
+});
+
+// Paste or drop files into a composer.
+document.addEventListener('paste', (e) => {
+  const form = e.target.closest?.('.composer');
+  if (!form || !e.clipboardData?.files?.length) return;
+  e.preventDefault();
+  for (const file of e.clipboardData.files) uploadFile(file, form.dataset.where);
+});
+for (const type of ['dragover', 'drop']) {
+  document.addEventListener(type, (e) => {
+    const zone = e.target.closest?.('.view-conv, .panel');
+    if (!zone || !state.current) return;
+    e.preventDefault();
+    if (type === 'drop') for (const file of e.dataTransfer.files) uploadFile(file, zone.classList.contains('panel') && state.thread ? 'thread' : 'main');
+  });
+}
+
+$('#msg-scroll').addEventListener('scroll', () => {
+  const box = $('#msg-scroll');
+  if (box.scrollTop < 40 && cacheFor(state.current).hasMore && !box.dataset.loading) {
+    box.dataset.loading = '1';
+    loadOlder().finally(() => delete box.dataset.loading);
+  }
+  markRead();
+});
+
+$('#search-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  runSearch({ q: e.target.q.value });
+});
+$('#search-filters').addEventListener('change', () => runSearch({}));
+$('#search-filters').addEventListener('submit', (e) => {
+  e.preventDefault();
+  runSearch({});
+});
+
+window.addEventListener('focus', () => {
+  markRead();
+  renderSidebar();
+});
+document.addEventListener('visibilitychange', markRead);
+
+// Idle → away (unless the user chose DND); back → their chosen status.
+let idleTimer = null;
+const resetIdle = debounce(() => {
+  clearTimeout(idleTimer);
+  const chosen = localStorage.getItem('presence') || 'online';
+  if (state.presence[ME] === 'away' && chosen === 'online') socket.send('presence.set', { status: 'online' });
+  idleTimer = setTimeout(() => chosen === 'online' && socket.send('presence.set', { status: 'away' }), 10 * 60_000);
+}, 1000);
+for (const ev of ['mousemove', 'keydown', 'focus']) window.addEventListener(ev, resetIdle);
+
+function route() {
+  const m = location.pathname.match(/^\/o\/[^/]+\/(c\/([^/]+)|meetings)/);
+  if (m?.[2]) openConversation(decodeURIComponent(m[2]), { push: false });
+  else if (m?.[1] === 'meetings') renderMeetings();
+  else showEmpty();
+}
+window.addEventListener('popstate', route);
+
+// ------------------------------------------------------------------- start
+
+(async () => {
+  try {
+    await loadAll();
+  } catch (err) {
+    toast(errorText(err), 'danger');
+  }
+  route();
+  socket.connect();
+  // Outbox entries from before a reload are retried once connected; if the
+  // socket never opens, fall back to HTTP after a few seconds.
+  setTimeout(() => !socket.isOpen() && flushOutbox(), 5000);
+})();
