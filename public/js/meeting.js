@@ -1,4 +1,4 @@
-import { $, $$, api, esc, hue, icon, initials, translator } from './lib.js';
+import { $, $$, api, esc, hue, icon, initials, randomId, translator } from './lib.js';
 
 // Meeting room client. Media is a peer-to-peer mesh over WebRTC; the server
 // (/ws/meeting) only admits people and relays SDP/ICE between admitted
@@ -18,6 +18,17 @@ const boot = JSON.parse($('#boot').textContent);
 const t = translator(boot.strings);
 const root = $('#meet');
 const SLOT = { audio: 0, camera: 1, screen: 2 };
+
+// Reconnection without dropping the call: when the room socket drops (network,
+// server restart), the media connections are kept — on peer-to-peer they do
+// not need the server — and the socket comes back in the background
+// (`resume`). The server keeps the place for 20 s and peers that still hold a
+// connection to this page (same PAGE id) keep it. After RESUME_GIVE_UP_MS
+// without success the call ends as before.
+const PAGE = randomId();
+const RESUME_GIVE_UP_MS = 45_000;
+const STALE_PEER_MS = 15_000;
+const resume = { active: false, since: 0, attempt: 0, timer: null, stale: new Map() };
 
 const state = {
   ws: null,
@@ -204,17 +215,107 @@ function connect() {
   ws.onclose = (e) => {
     if (state.ws !== ws) return;
     state.ws = null;
-    teardownPeers();
     for (const w of state.waiting.values()) w.reject(new Error('disconnected'));
     state.waiting.clear();
-    if (state.leaving || ['ended', 'removed', 'rejected', 'replaced'].includes(e.reason)) return;
+    if (state.leaving || ['ended', 'removed', 'rejected', 'replaced'].includes(e.reason)) return teardownPeers();
+    // Network drop or server restart while in the room: keep the call and
+    // reconnect in the background (the server re-checks admission).
+    if ([1001, 1006, 1011, 1012].includes(e.code) && state.joined && root.dataset.stage === 'room') return startResume();
+    teardownPeers();
     if (e.code === 1006 || e.code === 1001 || e.code === 1011 || e.reason === 'rejoin') {
-      // Network drop: rejoin (the server re-checks admission).
+      // Not in the room yet (or the SFU path broke): rejoin from scratch.
       setTimeout(() => !state.leaving && connect(), 2000);
       return;
     }
     if (root.dataset.stage !== 'ended') setEnded('meet.disconnected', '', true);
   };
+}
+
+function startResume() {
+  if (!resume.active) {
+    resume.active = true;
+    resume.since = Date.now();
+    resume.attempt = 0;
+    root.dataset.reconnecting = '1';
+    callBanner(t('meet.reconnecting'));
+  }
+  if (Date.now() - resume.since > RESUME_GIVE_UP_MS) {
+    endResume();
+    teardownPeers();
+    return setEnded('meet.disconnected', '', true);
+  }
+  const delay = Math.min(5000, 500 * 2 ** resume.attempt++);
+  clearTimeout(resume.timer);
+  resume.timer = setTimeout(() => !state.leaving && connect(), delay);
+}
+
+function endResume() {
+  resume.active = false;
+  clearTimeout(resume.timer);
+  delete root.dataset.reconnecting;
+  callBanner('');
+}
+
+// Reconciling after a resume, without two sides offering at once:
+// - a side that kept its connection to a peer marks it `kept` (for
+//   STALE_PEER_MS): an offer arriving for it means the other side rebuilt, so
+//   it rebuilds too and answers; a `rebuild` request makes it rebuild and offer;
+// - the resuming side offers to peers it could not keep;
+// - a side that sees a resumed peer it cannot keep waits for an offer and
+//   asks for one (`rebuild`), which a side that is already offering ignores.
+function markKept(peer) {
+  peer.kept = true;
+  clearTimeout(peer.keptTimer);
+  peer.keptTimer = setTimeout(() => (peer.kept = false), STALE_PEER_MS);
+}
+
+function rebuildPeer(id, initiator) {
+  const info = state.peers.get(id)?.info;
+  if (!info) return null;
+  removePeer(id);
+  addPeer(info, initiator);
+  return state.peers.get(id);
+}
+
+// A peer we hold a working connection to, from the same page.
+function keepable(peer, info) {
+  if (!peer || !info.page || peer.info.page !== info.page) return false;
+  if (state.topology === 'sfu') return true;
+  return !!peer.pc && !['failed', 'closed'].includes(peer.pc.connectionState);
+}
+
+// After a resumed join: keep what still works, rebuild what does not, and
+// give peers that are not back yet a moment before dropping them.
+function onResumed(d) {
+  endResume();
+  const listed = new Set(d.peers.map((p) => p.id));
+  for (const info of d.peers) {
+    const peer = state.peers.get(info.id);
+    clearTimeout(resume.stale.get(info.id));
+    resume.stale.delete(info.id);
+    if (keepable(peer, info)) {
+      peer.info = { ...peer.info, ...info };
+      markKept(peer);
+      renderTile(peer);
+    } else addPeer(info, d.topology !== 'sfu');
+  }
+  for (const id of state.peers.keys()) {
+    if (listed.has(id) || resume.stale.has(id)) continue;
+    resume.stale.set(id, setTimeout(() => {
+      resume.stale.delete(id);
+      removePeer(id);
+      renderPeople();
+    }, STALE_PEER_MS));
+  }
+  if (d.topology === 'sfu' && !(d.sfu_resumed && state.sfu)) {
+    const sfu = state.sfu;
+    state.sfu = null;
+    sfu?.pc.close();
+    state.topology = 'sfu';
+    sfuStart();
+  } else if (d.topology !== state.topology) moveTo(d.topology);
+  renderPeople();
+  layout();
 }
 
 function send(type, data = {}, id = undefined) {
@@ -240,7 +341,7 @@ function request(type, data) {
 
 function sendJoin() {
   const name = $('#guest-name')?.value.trim() || boot.displayName;
-  send('join', { name, audio: state.mic && !!state.local.audio, video: state.cam && !!state.local.video });
+  send('join', { name, page: PAGE, resume: resume.active, audio: state.mic && !!state.local.audio, video: state.cam && !!state.local.video });
 }
 
 function onServer(type, d) {
@@ -267,10 +368,24 @@ function onServer(type, d) {
       }
       return sfuSync();
     }
-    case 'peer.joined':
+    case 'peer.joined': {
+      clearTimeout(resume.stale.get(d.id));
+      resume.stale.delete(d.id);
+      // A peer coming back from a dropped socket, to whom our media path
+      // still works: nothing to rebuild.
+      const known = state.peers.get(d.id);
+      if (d.resume && keepable(known, d)) {
+        known.info = { ...known.info, ...d };
+        markKept(known);
+        renderTile(known);
+        return renderPeople();
+      }
       addPeer(d, false);
+      // It kept a connection to us that we no longer have: ask it to offer.
+      if (d.resume && state.topology !== 'sfu') send('signal', { to: d.id, data: { rebuild: true } });
       if (state.ringing) callBanner('');
       return renderPeople();
+    }
     case 'chat.message':
       return onChatMessage(d);
     case 'call.declined':
@@ -315,12 +430,18 @@ function onServer(type, d) {
 }
 
 function onJoined(d) {
+  const resuming = resume.active && state.joined;
   state.joined = true;
   state.self = d.self;
   state.iceServers = d.ice_servers;
   state.icePolicy = d.ice_policy || 'all';
   state.canManage = d.can_manage;
   state.screenAllowed = d.screen_share;
+  if (resuming) {
+    renderControls();
+    onChatState(d.chat);
+    return onResumed(d);
+  }
   stage('room');
   renderControls();
   addLocalTile();
@@ -708,8 +829,18 @@ const capAll = () => {
 };
 
 async function onSignal(from, data) {
-  const peer = state.peers.get(from);
+  let peer = state.peers.get(from);
   if (!peer) return;
+  if (data.rebuild) {
+    if (peer.kept) rebuildPeer(from, true);
+    return;
+  }
+  // An offer for a connection we kept across a resume: the other side
+  // rebuilt it, so we do too.
+  if (data.sdp?.type === 'offer' && peer.kept) {
+    peer = rebuildPeer(from, false);
+    if (!peer) return;
+  }
   try {
     if (data.sdp) {
       if (data.sdp.type === 'offer') {
