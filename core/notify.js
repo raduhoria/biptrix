@@ -1,5 +1,6 @@
 import { mentionEmail } from '../views/emails.js';
 import { createTranslator } from './i18n.js';
+import { nowIso } from './util.js';
 
 const THROTTLE_MS = 10 * 60_000;
 
@@ -20,10 +21,13 @@ export function createNotifier({ db, mailer, policies, config, isOnline }) {
       if (isOnline(org.id, userId)) continue;
       const key = `${userId}:${conversation.id}`;
       if (Date.now() - (last.get(key) || 0) < THROTTLE_MS) continue;
+      // Only people whose access to the organization is still valid: an
+      // expired collaborator gets no previews before maintenance removes them.
       const row = await db.get(
         `SELECT u.email, u.locale, cm.muted FROM users u JOIN conversation_members cm ON cm.user_id = u.id AND cm.conversation_id = ?
+         JOIN memberships m ON m.user_id = u.id AND m.org_id = ? AND m.status = 'active' AND (m.access_expires_at IS NULL OR m.access_expires_at > ?)
          WHERE u.id = ? AND u.status = 'active'`,
-        [conversation.id, userId]
+        [conversation.id, org.id, nowIso(), userId]
       );
       if (!row || row.muted) continue;
       last.set(key, Date.now());
