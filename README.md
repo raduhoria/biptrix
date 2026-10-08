@@ -117,7 +117,7 @@ parameter (consistent hash).
 - F4: simulcast (lower resolution for thumbnails in large meetings).
 - F5: cross-node presence and typing, rqlite load tests, billing.
 - P1/P2: SSO (OIDC/SAML), external calendar, recordings, native apps.
-- Backup: `db.backup()` (`VACUUM INTO`) exists; the orchestration script and restore test are not written yet.
+- Backup: `deploy/biptrix-backup` (database, files, secret, with a restore check); rqlite deployments use rqlite's own backups.
 
 ## Production: talk.altbetexchange.com
 
@@ -144,8 +144,12 @@ Cloudflare (proxied CNAME talk -> balancer.altbetexchange.com)
   6. `/readyz` check, directly and through nginx;
   7. automatic rollback if the check fails.
 - **Backups:** daily at 03:30 by `biptrix-backup.timer`, plus one before every
-  deploy. The last 14 are kept. Uploaded files (`/var/lib/biptrix/files`) must
-  be covered by the host backup.
+  deploy, in `/var/lib/biptrix/backups/biptrix-<time>/` (owner-only): the
+  database, the uploaded files (hard links), the environment with
+  `APP_SECRET`. Each one is restored into a temporary directory and checked
+  (integrity, every attachment has its file) before it counts. The last 14
+  are kept; restore steps are at the top of `deploy/biptrix-backup`. Copy
+  them off the host too.
 - **Routing changes** (2026-10-08):
   - `use_backend be_biptrix` plus the `be_biptrix` backend on both load
     balancers; backups in `/root/codex-backups/talk-altbet-*`;

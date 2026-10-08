@@ -284,9 +284,18 @@ export function createChat({ db, events, audit, policies }) {
       [org.id]
     );
 
-  // Recipients of a conversation event (read at delivery time).
+  // Recipients of a conversation event (read at delivery time): members
+  // whose organization access is still valid — an expired collaborator
+  // receives nothing even before the maintenance sweep removes them.
   const memberIds = async (conversationId) =>
-    (await db.all('SELECT user_id FROM conversation_members WHERE conversation_id = ?', [conversationId || ''])).map((r) => r.user_id);
+    (
+      await db.all(
+        `SELECT cm.user_id FROM conversation_members cm JOIN conversations c ON c.id = cm.conversation_id
+         JOIN memberships m ON m.org_id = c.org_id AND m.user_id = cm.user_id
+         WHERE cm.conversation_id = ? AND m.status = 'active' AND (m.access_expires_at IS NULL OR m.access_expires_at > ?)`,
+        [conversationId || '', nowIso()]
+      )
+    ).map((r) => r.user_id);
 
   // ---------------------------------------------------------------- messages
 

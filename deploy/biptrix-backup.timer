@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Biptrix database backup
+Description=Daily Biptrix backup
 
 [Timer]
 OnCalendar=*-*-* 03:30:00

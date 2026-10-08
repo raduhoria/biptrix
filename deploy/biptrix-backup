@@ -1,21 +1,78 @@
 #!/bin/bash
 # /usr/local/sbin/biptrix-backup on ai-wizz (root:root 0755), run as biptrix:
 # by the pipeline before every deploy, and daily by biptrix-backup.timer.
-# A consistent online copy (VACUUM INTO) of the SQLite database, gzip, and
-# the last 14 kept. Files (FILES_DIR) are not copied here: include
-# /var/lib/biptrix/files in the host backup.
+#
+# One directory per run, everything needed to restore:
+#   biptrix.db.gz  consistent online copy of the database (VACUUM INTO)
+#   files/         the uploaded files, hard-linked from FILES_DIR (they are
+#                  immutable, so a link is a full copy that costs no space
+#                  and survives the deletion of the original)
+#   biptrix.env    the environment, including APP_SECRET (without it MFA
+#                  secrets cannot be decrypted)
+#   SHA256SUMS
+# The database is copied first: a file uploaded meanwhile is only an extra.
+# Every backup is then restored into a temporary directory and checked
+# (integrity_check, every attachment row has its file); a failed check
+# fails the run. Only the owner can read the backups (umask 077).
+#
+# Restore: stop biptrix.service, then as biptrix
+#   gunzip -c <dir>/biptrix.db.gz > /var/lib/biptrix/biptrix.db
+#   cp -a <dir>/files/. /var/lib/biptrix/files/
+# and install <dir>/biptrix.env (or its APP_SECRET) in PROD_ENV.
 set -euo pipefail
-DB=/var/lib/biptrix/biptrix.db
-DIR=/var/lib/biptrix/backups
+umask 077
+DATA=/var/lib/biptrix
+DB=$DATA/biptrix.db
+FILES=$DATA/files
+ENV_FILE=/etc/biptrix/biptrix.env
+DIR=$DATA/backups
 KEEP=14
 [ -f "$DB" ] || { echo "no database yet, nothing to back up"; exit 0; }
 mkdir -p "$DIR"
-OUT="$DIR/biptrix-$(date -u +%Y%m%dT%H%M%SZ).db"
+chmod 0700 "$DIR"
+
+NAME="biptrix-$(date -u +%Y%m%dT%H%M%SZ)"
+WORK="$DIR/.$NAME"
+OUT="$DIR/$NAME"
+CHECK="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$CHECK"' EXIT
+mkdir "$WORK"
+
 node --disable-warning=ExperimentalWarning -e '
   const { DatabaseSync } = require("node:sqlite");
   const db = new DatabaseSync(process.argv[1], { readOnly: true });
   db.exec(`VACUUM INTO ${JSON.stringify(process.argv[2]).replace(/"/g, "\x27")}`);
-' "$DB" "$OUT"
-gzip -9 "$OUT"
-ls -1t "$DIR"/biptrix-*.db.gz | tail -n +$((KEEP + 1)) | xargs -r rm -f
-echo "backup $OUT.gz ($(du -h "$OUT.gz" | cut -f1))"
+' "$DB" "$WORK/biptrix.db"
+
+mkdir "$WORK/files"
+if [ -d "$FILES" ]; then
+  # Same filesystem: hard links; otherwise (or if linking fails) a copy.
+  # Uploads in progress (.tmp) are not part of the data.
+  cp -al "$FILES/." "$WORK/files/" 2>/dev/null || { rm -rf "$WORK/files" && mkdir "$WORK/files" && cp -a "$FILES/." "$WORK/files/"; }
+  rm -rf "$WORK/files/.tmp"
+fi
+[ -r "$ENV_FILE" ] && cp "$ENV_FILE" "$WORK/biptrix.env"
+
+# Restore test, on the backup itself.
+cp "$WORK/biptrix.db" "$CHECK/restored.db"
+node --disable-warning=ExperimentalWarning -e '
+  const { DatabaseSync } = require("node:sqlite");
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const db = new DatabaseSync(process.argv[1], { readOnly: true });
+  const integrity = db.prepare("PRAGMA integrity_check").get();
+  if (Object.values(integrity)[0] !== "ok") { console.error("integrity_check failed:", integrity); process.exit(1); }
+  const keys = db.prepare("SELECT storage_key FROM attachments").all();
+  const missing = keys.filter((r) => !fs.existsSync(path.join(process.argv[2], r.storage_key)));
+  if (missing.length) { console.error(`${missing.length} attachment file(s) missing from the backup, e.g. ${missing[0].storage_key}`); process.exit(1); }
+  const users = db.prepare("SELECT COUNT(*) AS n FROM users").get().n;
+  console.log(`restore check ok: ${users} users, ${keys.length} files`);
+' "$CHECK/restored.db" "$WORK/files"
+
+gzip -9 "$WORK/biptrix.db"
+(cd "$WORK" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS)
+mv "$WORK" "$OUT"
+
+# Rotation (also removes archives left by the previous, database-only script).
+ls -1dt "$DIR"/biptrix-* 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -rf
+echo "backup $OUT ($(du -sh "$OUT" | cut -f1))"

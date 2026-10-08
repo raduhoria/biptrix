@@ -72,9 +72,16 @@ function createRqliteDb({ rqliteUrls, rqliteUser, rqlitePassword, readConsistenc
   const RETRIES = 3;
   let preferred = 0;
 
-  const retryable = (msg) => /leader not found|not leader|no leader|ECONNREFUSED|ECONNRESET|fetch failed|timeout|aborted/i.test(String(msg));
+  // Reads can always be retried. A write is retried only when it certainly
+  // was not applied (connection refused, no leader): after a timeout or a
+  // reset the batch may have committed with the answer lost, and running it
+  // again would apply it twice (a counter incremented twice, a second row).
+  // That outcome is reported as db_unavailable instead.
+  const reason = (err) => `${err.message} ${err.cause?.code || ''}`;
+  const retryable = (err) => /leader not found|not leader|no leader|ECONNREFUSED|ECONNRESET|fetch failed|timeout|aborted/i.test(reason(err));
+  const notApplied = (err) => /leader not found|not leader|no leader|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(reason(err));
 
-  async function call(urlPath, body) {
+  async function call(urlPath, body, { write = false } = {}) {
     let lastError;
     for (let attempt = 0; attempt <= RETRIES; attempt++) {
       for (let i = 0; i < rqliteUrls.length; i++) {
@@ -95,7 +102,10 @@ function createRqliteDb({ rqliteUrls, rqliteUser, rqlitePassword, readConsistenc
           return parsed;
         } catch (err) {
           lastError = err;
-          if (!retryable(err.message)) throw err;
+          if (write ? !notApplied(err) : !retryable(err)) {
+            if (write && retryable(err)) throw Object.assign(new Error(`rqlite write outcome unknown: ${err.message}`), { code: 'db_unavailable' });
+            throw err;
+          }
         }
       }
       if (attempt < RETRIES) await new Promise((r) => setTimeout(r, 200 * 2 ** attempt));
@@ -115,7 +125,7 @@ function createRqliteDb({ rqliteUrls, rqliteUser, rqlitePassword, readConsistenc
 
   async function batch(statements) {
     if (!statements.length) return [];
-    const r = await call('/db/execute?transaction', statements.map(([sql, params = []]) => [sql, ...params]));
+    const r = await call('/db/execute?transaction', statements.map(([sql, params = []]) => [sql, ...params]), { write: true });
     return (r.results || []).map((x) => {
       if (x.error) throw new Error(x.error);
       return { changes: Number(x.rows_affected || 0) };

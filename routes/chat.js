@@ -113,9 +113,10 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
   });
 
   // External collaborators: invite someone by e-mail into a Space. A person
-  // already in the organization is simply added; anyone else gets an
-  // invitation as an external collaborator (only this Space, access
-  // expiring per policy) and joins the Space on acceptance.
+  // already in the organization is simply added (chat.addMembers applies the
+  // collaborator policy when that person is an external collaborator);
+  // anyone else gets an invitation as an external collaborator (only this
+  // Space, access expiring per policy) and joins the Space on acceptance.
   const INVITES_PER_DAY = 50;
   router.post(api('/conversations/:id/invite'), ...member, async (req, res) => {
     const body = await readJson(req);

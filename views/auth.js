@@ -143,7 +143,7 @@ export function inviteView({ t, invite, token, user, error = '' }) {
 }
 
 // Account: profile, language, password, MFA, sessions.
-export function accountView({ t, user, orgs, sessions, currentHash, notice = '', error = '', mfaSetup = null, next = '', hasPassword = true }) {
+export function accountView({ t, user, orgs, sessions, currentHash, notice = '', error = '', mfaSetup = null, next = '', hasPassword = true, codeSent = false }) {
   const back = orgs[0] ? `/o/${orgs[0].slug}` : '/';
   const mfa = user.mfa_enabled
     ? `<p class="mb-3"><span class="badge text-bg-success">${icon('shield')} ${escapeHtml(t('account.mfaOn'))}</span></p>
@@ -196,11 +196,19 @@ export function accountView({ t, user, orgs, sessions, currentHash, notice = '',
   <section class="card mb-4"><div class="card-body">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('account.password'))}</h2>
     ${hasPassword ? '' : `<p class="small text-body-secondary">${escapeHtml(t('account.noPassword'))}</p>`}
-    <form method="post" action="/account/password" class="row g-3">
-      ${hasPassword ? `<div class="col-md-6"><label class="form-label" for="p-cur">${escapeHtml(t('account.currentPassword'))}</label><input class="form-control" id="p-cur" type="password" name="current" autocomplete="current-password" required></div>` : ''}
+    ${
+      hasPassword || codeSent
+        ? `<form method="post" action="/account/password" class="row g-3">
+      ${
+        hasPassword
+          ? `<div class="col-md-6"><label class="form-label" for="p-cur">${escapeHtml(t('account.currentPassword'))}</label><input class="form-control" id="p-cur" type="password" name="current" autocomplete="current-password" required></div>`
+          : `<div class="col-md-6"><label class="form-label" for="p-code">${escapeHtml(t('account.emailCode'))}</label><input class="form-control" id="p-code" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus></div>`
+      }
       <div class="col-md-6"><label class="form-label" for="p-new">${escapeHtml(t('auth.newPassword'))}</label><input class="form-control" id="p-new" type="password" name="password" autocomplete="new-password" minlength="10" required><div class="form-text">${escapeHtml(t('auth.passwordRule'))}</div></div>
       <div class="col-12"><button class="btn btn-primary">${escapeHtml(t(hasPassword ? 'account.changePassword' : 'account.setPassword'))}</button></div>
-    </form>
+    </form>`
+        : `<form method="post" action="/account/password/code"><button class="btn btn-primary">${escapeHtml(t('account.sendCode'))}</button></form>`
+    }
   </div></section>
   <section class="card mb-4" id="mfa"><div class="card-body">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('account.mfa'))}</h2>

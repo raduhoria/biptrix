@@ -60,7 +60,7 @@ export function registerAdminRoutes(router, { auth, orgs, chat, policies, audit,
     const form = await readForm(req);
     try {
       const inv = await orgs.invite(req.org, { email: form.get('email'), role: form.get('role') || 'member' }, req.actor, req.ip);
-      mailer.queue({ to: inv.email, ...orgInviteEmail({ t: req.t, org: req.org.name, inviter: req.user.name, url: `${config.appUrl}/invite/${inv.token}` }) });
+      mailer.queue({ to: inv.email, ...orgInviteEmail({ t: req.t, org: req.org.name, inviter: req.user.name, role: form.get('role') || 'member', url: `${config.appUrl}/invite/${inv.token}` }) });
       res.redirect(`${base(req)}/members?notice=inviteSent`);
     } catch (err) {
       res.redirect(`${base(req)}/members?error=${errorKey(err)}`);

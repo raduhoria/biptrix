@@ -1,10 +1,17 @@
-# Daily database backup (see /usr/local/sbin/biptrix-backup).
+# Daily backup: database, uploaded files, environment (see /usr/local/sbin/biptrix-backup).
 [Unit]
-Description=Biptrix database backup
+Description=Biptrix backup
 ConditionPathExists=/var/lib/biptrix/biptrix.db
 
 [Service]
 Type=oneshot
 User=biptrix
 Group=biptrix
+# Backups hold the whole database and APP_SECRET: owner-only.
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/biptrix
 ExecStart=/usr/local/sbin/biptrix-backup

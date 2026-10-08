@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, rename, stat, unlink } from 'node:fs/promises';
+import { mkdir, readdir, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
@@ -40,6 +40,7 @@ function cleanName(name) {
 // conversation membership on every request (spec §7.3, §15).
 export function createFiles({ db, config, policies }) {
   const root = path.resolve(config.filesDir);
+  const tmpDir = path.join(root, '.tmp');
 
   function avScan(file) {
     if (!config.avScanCmd) return Promise.resolve();
@@ -76,8 +77,11 @@ export function createFiles({ db, config, policies }) {
     const id = newId();
     const key = `${org.id}/${id}`;
     const target = path.join(root, key);
-    const temp = `${target}.part`;
+    // Uploads in progress live in one directory, so bytes left by a crash
+    // are found without walking every organization (pruneOrphans).
+    const temp = path.join(tmpDir, id);
     await mkdir(path.dirname(target), { recursive: true });
+    await mkdir(tmpDir, { recursive: true });
     const hash = createHash('sha256');
     let size = 0;
     let head = Buffer.alloc(0);
@@ -93,24 +97,21 @@ export function createFiles({ db, config, policies }) {
         cb(null, chunk);
       },
     });
+    // The row is registered before the bytes move into place: every file
+    // under its final name has a row, so it is always counted and always
+    // reaches the deletion queue. Any failure removes what was created; a
+    // crash leaves at most a row without a message (pruned after a day,
+    // its key queued) and a temp file (swept by pruneOrphans).
     try {
       await pipeline(req, meter, createWriteStream(temp, { flags: 'wx', mode: 0o640 }));
       if (!size) throw appError('invalid', 'Empty file');
       const magic = MAGIC[mime];
       if (magic && !magic.every((b, i) => head[i] === b)) throw appError('invalid', 'File content does not match its type', { reason: 'type' });
       await avScan(temp);
-      await rename(temp, target);
-    } catch (err) {
-      reserve(-size);
-      await unlink(temp).catch(() => {});
-      throw err;
-    }
-    // Atomic quota check across nodes: the row is only inserted if it still
-    // fits; otherwise the bytes are removed and the upload refused.
-    const fits = `(SELECT COALESCE(SUM(size), 0) FROM attachments WHERE org_id = ?) + ? <= (SELECT storage_quota_mb * 1048576 FROM organizations WHERE id = ?)`;
-    let results;
-    try {
-      results = await db.batch([
+      // Atomic quota check across nodes: the row is only inserted if it
+      // still fits; otherwise the upload is refused.
+      const fits = `(SELECT COALESCE(SUM(size), 0) FROM attachments WHERE org_id = ?) + ? <= (SELECT storage_quota_mb * 1048576 FROM organizations WHERE id = ?)`;
+      const [inserted] = await db.batch([
         [`INSERT INTO attachments (id, org_id, uploader_id, name, mime, size, sha256, storage_key, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${fits}`, [id, org.id, user.id, name, mime, size, hash.digest('hex'), key, nowIso(), org.id, size, org.id]],
         [
           `INSERT INTO usage_counters (org_id, period, metric, value) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM attachments WHERE id = ?)
@@ -118,12 +119,18 @@ export function createFiles({ db, config, policies }) {
           [org.id, nowIso().slice(0, 7), 'upload_bytes', size, id],
         ],
       ]);
+      if (!inserted.changes) throw appError('quota_exceeded', 'Storage quota reached', { reason: 'storage' });
+      try {
+        await rename(temp, target);
+      } catch (err) {
+        await db.run('DELETE FROM attachments WHERE id = ?', [id]).catch(() => {});
+        throw err;
+      }
+    } catch (err) {
+      await unlink(temp).catch(() => {});
+      throw err;
     } finally {
       reserve(-size);
-    }
-    if (!results[0].changes) {
-      await unlink(target).catch(() => {});
-      throw appError('quota_exceeded', 'Storage quota reached', { reason: 'storage' });
     }
     return { id, name, mime, size };
   }
@@ -154,9 +161,15 @@ export function createFiles({ db, config, policies }) {
 
   // Uploads never attached to a message are dropped after a day (their bytes
   // go through the deletion queue like every other removed attachment).
+  // Temp files older than a day belong to uploads that died midway.
   async function pruneOrphans() {
     const cutoff = new Date(Date.now() - 86400_000).toISOString();
     await db.run('DELETE FROM attachments WHERE message_id IS NULL AND created_at < ?', [cutoff]);
+    for (const name of await readdir(tmpDir).catch(() => [])) {
+      const full = path.join(tmpDir, name);
+      const info = await stat(full).catch(() => null);
+      if (info && info.mtimeMs < Date.now() - 86400_000) await unlink(full).catch(() => {});
+    }
   }
 
   // Deletion queue (file_deletions, filled by a trigger on attachments):
