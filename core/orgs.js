@@ -39,19 +39,31 @@ export function createOrgs({ db, users, audit }) {
     return `${base}-${newId().slice(0, 6).toLowerCase()}`;
   }
 
-  // Creates an organization; the owner is an existing user (operator console
-  // or first-run setup). Owners without an account get an org invite instead.
-  async function create({ name, ownerId = null, actor, ip }) {
+  // The statements that create an organization (policies row, audit, and
+  // optionally the owner's membership), for callers that need them inside a
+  // larger atomic batch (first-run setup). `when` is an SQL guard added to
+  // every statement (with its parameters).
+  async function createStatements({ name, ownerId = null, actor, ip, when = '1', whenArgs = [] }) {
     const cleanName = String(name || '').trim().slice(0, 80);
     if (!cleanName) throw appError('invalid', 'Name required', { field: 'name' });
     const id = newId();
     const at = nowIso();
+
     const statements = [
-      ['INSERT INTO organizations (id, slug, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', [id, await uniqueSlug(cleanName), cleanName, 'active', at, at]],
-      ['INSERT INTO policies (org_id, version, data, updated_at) VALUES (?, 1, ?, ?)', [id, '{}', at]],
-      audit.statement({ orgId: id, actor, action: 'org.create', resourceType: 'organization', resourceId: id, ip, data: { name: cleanName } }),
+      [`INSERT INTO organizations (id, slug, name, status, created_at, updated_at) SELECT ?, ?, ?, 'active', ?, ? WHERE ${when}`, [id, await uniqueSlug(cleanName), cleanName, at, at, ...whenArgs]],
+      [`INSERT INTO policies (org_id, version, data, updated_at) SELECT ?, 1, '{}', ? WHERE ${when}`, [id, at, ...whenArgs]],
+      audit.statement({ orgId: id, actor, action: 'org.create', resourceType: 'organization', resourceId: id, ip, data: { name: cleanName } }, when, whenArgs),
     ];
-    if (ownerId) statements.push(['INSERT INTO memberships (org_id, user_id, role, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', [id, ownerId, 'owner', 'active', at, at]]);
+    if (ownerId) {
+      statements.push([`INSERT INTO memberships (org_id, user_id, role, status, created_at, updated_at) SELECT ?, ?, 'owner', 'active', ?, ? WHERE ${when}`, [id, ownerId, at, at, ...whenArgs]]);
+    }
+    return { id, statements };
+  }
+
+  // Creates an organization; the owner is an existing user (operator console
+  // or first-run setup). Owners without an account get an org invite instead.
+  async function create(fields) {
+    const { id, statements } = await createStatements(fields);
     await db.batch(statements);
     return byId(id);
   }
@@ -85,34 +97,37 @@ export function createOrgs({ db, users, audit }) {
     return (await db.get("SELECT COUNT(*) AS n FROM memberships WHERE org_id = ? AND status = 'active'", [orgId])).n;
   }
 
+  // "At least one active owner" is enforced inside the UPDATE itself, so two
+  // concurrent demotions cannot both pass a check made beforehand.
+  const keepsAnOwner = `(role != 'owner' OR (SELECT COUNT(*) FROM memberships WHERE org_id = ? AND role = 'owner' AND status = 'active') > 1)`;
+
   async function setRole(org, userId, role, actor, ip) {
     if (!ORG_ROLES.includes(role)) throw appError('invalid', 'Unknown role');
     const current = await membership(org.id, userId);
     if (!current) throw appError('not_found', 'Member not found');
-    if (current.role === 'owner' && role !== 'owner') {
-      const owners = await db.get("SELECT COUNT(*) AS n FROM memberships WHERE org_id = ? AND role = 'owner' AND status = 'active'", [org.id]);
-      if (owners.n <= 1) throw appError('conflict', 'An organization needs at least one owner', { reason: 'lastOwner' });
-    }
-    await db.batch([
-      ['UPDATE memberships SET role = ?, updated_at = ? WHERE org_id = ? AND user_id = ?', [role, nowIso(), org.id, userId]],
-      audit.statement({ orgId: org.id, actor, action: 'member.role', resourceType: 'user', resourceId: userId, ip, data: { from: current.role, to: role } }),
+    const [res] = await db.batch([
+      [
+        `UPDATE memberships SET role = ?, updated_at = ? WHERE org_id = ? AND user_id = ? AND status = 'active' AND (? = 'owner' OR ${keepsAnOwner})`,
+        [role, nowIso(), org.id, userId, role, org.id],
+      ],
     ]);
+    if (!res.changes) throw appError('conflict', 'An organization needs at least one owner', { reason: 'lastOwner' });
+    await audit.log({ orgId: org.id, actor, action: 'member.role', resourceType: 'user', resourceId: userId, ip, data: { from: current.role, to: role } });
   }
 
   // Revocation (spec §5, criterion 20): the membership ends, the user leaves
   // every conversation of this org. Live sockets are closed by the caller
   // (realtime.disconnectUser) right after.
   async function revoke(org, userId, actor, ip) {
-    const current = await membership(org.id, userId);
-    if (!current) throw appError('not_found', 'Member not found');
-    if (current.role === 'owner') {
-      const owners = await db.get("SELECT COUNT(*) AS n FROM memberships WHERE org_id = ? AND role = 'owner' AND status = 'active'", [org.id]);
-      if (owners.n <= 1) throw appError('conflict', 'An organization needs at least one owner', { reason: 'lastOwner' });
-    }
+    if (!(await membership(org.id, userId))) throw appError('not_found', 'Member not found');
+    const at = nowIso();
+    const [res] = await db.batch([
+      [`UPDATE memberships SET status = 'revoked', updated_at = ? WHERE org_id = ? AND user_id = ? AND status = 'active' AND ${keepsAnOwner}`, [at, org.id, userId, org.id]],
+    ]);
+    if (!res.changes) throw appError('conflict', 'An organization needs at least one owner', { reason: 'lastOwner' });
     await db.batch([
-      ["UPDATE memberships SET status = 'revoked', updated_at = ? WHERE org_id = ? AND user_id = ?", [nowIso(), org.id, userId]],
       ['DELETE FROM conversation_members WHERE user_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE org_id = ?)', [userId, org.id]],
-      ["UPDATE meeting_participants SET state = 'removed', left_at = ? WHERE user_id = ? AND state IN ('lobby', 'admitted') AND meeting_id IN (SELECT id FROM meetings WHERE org_id = ?)", [nowIso(), userId, org.id]],
+      ["UPDATE meeting_participants SET state = 'removed', left_at = ? WHERE user_id = ? AND state IN ('lobby', 'admitted') AND meeting_id IN (SELECT id FROM meetings WHERE org_id = ?)", [at, userId, org.id]],
       audit.statement({ orgId: org.id, actor, action: 'member.revoke', resourceType: 'user', resourceId: userId, ip }),
     ]);
   }
@@ -148,27 +163,46 @@ export function createOrgs({ db, users, audit }) {
 
   // Accept: an existing account just gains the membership; a new person
   // creates their account in the same atomic batch.
+  // Accept: an existing account just gains the membership; a new person
+  // creates their account in the same atomic batch. The first statement
+  // claims the invitation and checks the member limit at once; everything
+  // else only happens if that claim is ours (accepted_by), so concurrent
+  // acceptances cannot exceed the limit or use one invitation twice.
   async function acceptInvite(token, { userId = null, name, passwordHash }) {
     const inv = await inviteByToken(token);
     const at = nowIso();
     let accountId = userId;
-    const statements = [];
+    let userInsert = null;
     if (!accountId) {
       if (await users.byEmail(inv.email)) throw appError('conflict', 'Account exists; sign in first', { reason: 'signInFirst' });
       const created = users.insertStatement({ email: inv.email, name, passwordHash });
       accountId = created.id;
-      statements.push(created.statement);
+      userInsert = created.statement;
     }
+    const claimed = 'EXISTS (SELECT 1 FROM org_invites WHERE id = ? AND accepted_by = ?)';
+    const claimArgs = [inv.id, accountId];
+    const statements = [
+      [
+        `UPDATE org_invites SET accepted_at = ?, accepted_by = ? WHERE id = ? AND accepted_at IS NULL AND revoked_at IS NULL
+           AND (SELECT COUNT(*) FROM memberships WHERE org_id = ? AND status = 'active' AND user_id != ?) < (SELECT max_members FROM organizations WHERE id = ?)`,
+        [at, accountId, inv.id, inv.org_id, accountId, inv.org_id],
+      ],
+    ];
+    if (userInsert) statements.push([userInsert[0].replace(/VALUES \(([^)]*)\)$/s, `SELECT $1 WHERE ${claimed}`), [...userInsert[1], ...claimArgs]]);
     statements.push(
       [
-        `INSERT INTO memberships (org_id, user_id, role, status, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?)
+        `INSERT INTO memberships (org_id, user_id, role, status, created_at, updated_at) SELECT ?, ?, ?, 'active', ?, ? WHERE ${claimed}
          ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role, status = 'active', updated_at = excluded.updated_at`,
-        [inv.org_id, accountId, inv.role, at, at],
+        [inv.org_id, accountId, inv.role, at, at, ...claimArgs],
       ],
-      ['UPDATE org_invites SET accepted_at = ? WHERE id = ?', [at, inv.id]],
-      audit.statement({ orgId: inv.org_id, actor: { id: accountId, email: inv.email }, action: 'member.join', resourceType: 'invite', resourceId: inv.id })
+      audit.statement({ orgId: inv.org_id, actor: { id: accountId, email: inv.email }, action: 'member.join', resourceType: 'invite', resourceId: inv.id }, claimed, claimArgs)
     );
-    await db.batch(statements);
+    const [claim] = await db.batch(statements);
+    if (!claim.changes) {
+      const now = await db.get('SELECT accepted_at, revoked_at FROM org_invites WHERE id = ?', [inv.id]);
+      if (now?.accepted_at || now?.revoked_at) throw appError('not_found', 'Invitation not found');
+      throw appError('quota_exceeded', 'Member limit reached', { reason: 'members' });
+    }
     return { orgSlug: inv.org_slug, userId: accountId };
   }
 
@@ -210,6 +244,7 @@ export function createOrgs({ db, users, audit }) {
     forUser,
     membership,
     create,
+    createStatements,
     setStatus,
     updateLimits,
     members,

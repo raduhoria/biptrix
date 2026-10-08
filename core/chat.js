@@ -10,9 +10,12 @@ const MENTION_RE = /<@([A-Za-z0-9_-]{10,40})>/g;
 const EMOJI_RE = /^[^\s<>"'`]{1,16}$/;
 
 const period = () => nowIso().slice(0, 7);
-const usage = (orgId, metric, n = 1) => [
-  'INSERT INTO usage_counters (org_id, period, metric, value) VALUES (?, ?, ?, ?) ON CONFLICT(org_id, period, metric) DO UPDATE SET value = value + excluded.value',
-  [orgId, period(), metric, n],
+// Usage counter increment, only when `guard` holds (e.g. the message was
+// really inserted — a concurrent retry must not count twice).
+const usage = (orgId, metric, n = 1, guard = '1', guardArgs = []) => [
+  `INSERT INTO usage_counters (org_id, period, metric, value) SELECT ?, ?, ?, ? WHERE ${guard}
+   ON CONFLICT(org_id, period, metric) DO UPDATE SET value = value + excluded.value`,
+  [orgId, period(), metric, n, ...guardArgs],
 ];
 
 // createChat: conversations (DM, groups, Spaces), memberships and messages
@@ -60,13 +63,14 @@ export function createChat({ db, events, audit }) {
     return rows.map((r) => ({ ...JSON.parse(r.json), last_read_seq: r.last_read_seq, my_role: r.role, muted: !!r.muted, unread: r.unread, mentions: r.mentions, last_message: parseJson(r.last_message, null) }));
   }
 
-  async function one(conversationId, user) {
+  // One conversation of `org` the user belongs to (null otherwise).
+  async function one(org, conversationId, user) {
     const row = await db.get(
       `SELECT ${conversationJson} AS json, cm.last_read_seq, cm.role, cm.muted,
          (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.seq > cm.last_read_seq AND m.author_id IS NOT ? AND m.deleted_at IS NULL) AS unread,
          (SELECT COUNT(*) FROM message_mentions mm WHERE mm.user_id = ? AND mm.conversation_id = c.id AND mm.seq > cm.last_read_seq) AS mentions
-       FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = ? WHERE c.id = ?`,
-      [user.id, user.id, user.id, conversationId]
+       FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = ? WHERE c.id = ? AND c.org_id = ?`,
+      [user.id, user.id, user.id, conversationId, org.id]
     );
     return row ? { ...JSON.parse(row.json), last_read_seq: row.last_read_seq, my_role: row.role, muted: !!row.muted, unread: row.unread, mentions: row.mentions } : null;
   }
@@ -112,7 +116,7 @@ export function createChat({ db, events, audit }) {
     if (existing) {
       // A DM survives membership changes; make sure the caller is (back) in it.
       await db.batch(memberRows(existing.id, [user.id], nowIso()));
-      return one(existing.id, user);
+      return one(org, existing.id, user);
     }
     const id = newId();
     const at = nowIso();
@@ -123,7 +127,7 @@ export function createChat({ db, events, audit }) {
     ]);
     events.notify();
     const created = await db.get('SELECT id FROM conversations WHERE org_id = ? AND dm_key = ?', [org.id, key]);
-    return one(created.id, user);
+    return one(org, created.id, user);
   }
 
   async function createGroup(org, user, role, { memberIds = [], name = '' }) {
@@ -138,7 +142,7 @@ export function createChat({ db, events, audit }) {
       events.statement({ orgId: org.id, conversationId: id, type: 'conversation.created', data: { id } }),
     ]);
     events.notify();
-    return one(id, user);
+    return one(org, id, user);
   }
 
   async function createSpace(org, user, role, { name, description = '', visibility = 'public', memberIds = [] }, ip) {
@@ -159,7 +163,7 @@ export function createChat({ db, events, audit }) {
       audit.statement({ orgId: org.id, actor: user, action: 'space.create', resourceType: 'space', resourceId: id, ip, data: { name: cleanName, visibility } }),
     ]);
     events.notify();
-    return one(id, user);
+    return one(org, id, user);
   }
 
   const browseSpaces = (org, user) =>
@@ -178,7 +182,7 @@ export function createChat({ db, events, audit }) {
     if (!space || space.visibility !== 'public') throw appError('not_found', 'Space not found');
     await db.batch([...memberRows(space.id, [user.id], nowIso()), events.statement({ orgId: org.id, conversationId: space.id, type: 'conversation.members', data: { id: space.id, added: [user.id] } })]);
     events.notify();
-    return one(space.id, user);
+    return one(org, space.id, user);
   }
 
   async function members(org, user, conversationId) {
@@ -324,27 +328,33 @@ export function createChat({ db, events, audit }) {
     const mentioned = await mentionIds(conv.id, text);
     const id = newId();
     const at = nowIso();
-    const notDuplicate = 'NOT EXISTS (SELECT 1 FROM messages WHERE conversation_id = ? AND author_id = ? AND client_message_id = ?)';
+    // Every effect of the send depends on two guards evaluated inside the
+    // same atomic batch: not a duplicate of an already stored message, and
+    // (with files) every attachment still unattached — a concurrent send
+    // that grabbed a file first makes this one fail cleanly instead of
+    // saving an empty message.
+    const fileList = files.map(() => '?').join(',');
+    const go = `NOT EXISTS (SELECT 1 FROM messages WHERE conversation_id = ? AND author_id = ? AND client_message_id = ?)${
+      files.length ? ` AND (SELECT COUNT(*) FROM attachments WHERE id IN (${fileList}) AND uploader_id = ? AND message_id IS NULL) = ${files.length}` : ''
+    }`;
+    const goArgs = [conv.id, user.id, cid, ...(files.length ? [...files, user.id] : [])];
     const inserted = 'EXISTS (SELECT 1 FROM messages WHERE id = ?)';
 
     const statements = [
-      [`UPDATE conversations SET last_seq = last_seq + 1, last_message_at = ? WHERE id = ? AND ${notDuplicate}`, [at, conv.id, conv.id, user.id, cid]],
+      [`UPDATE conversations SET last_seq = last_seq + 1, last_message_at = ? WHERE id = ? AND ${go}`, [at, conv.id, ...goArgs]],
       [
         `INSERT OR IGNORE INTO messages (id, org_id, conversation_id, seq, author_id, client_message_id, kind, body, meta, parent_id, created_at)
-         SELECT ?, ?, ?, c.last_seq, ?, ?, ?, ?, ?, ?, ? FROM conversations c WHERE c.id = ? AND ${notDuplicate}`,
-        [id, org.id, conv.id, user.id, cid, kind, text, meta ? JSON.stringify(meta) : null, parentId, at, conv.id, conv.id, user.id, cid],
+         SELECT ?, ?, ?, c.last_seq, ?, ?, ?, ?, ?, ?, ? FROM conversations c WHERE c.id = ? AND ${go}`,
+        [id, org.id, conv.id, user.id, cid, kind, text, meta ? JSON.stringify(meta) : null, parentId, at, conv.id, ...goArgs],
       ],
       [`UPDATE conversation_members SET last_read_seq = (SELECT seq FROM messages WHERE id = ?) WHERE conversation_id = ? AND user_id = ? AND ${inserted}`, [id, conv.id, user.id, id]],
-      usage(org.id, 'messages'),
+      usage(org.id, 'messages', 1, inserted, [id]),
     ];
     if (parentId) {
-      statements.push([`UPDATE messages SET reply_count = reply_count + 1 WHERE id = ? AND ${inserted}`, [parentId, id]], events.messageEvent('message.updated', parentId));
+      statements.push([`UPDATE messages SET reply_count = reply_count + 1 WHERE id = ? AND ${inserted}`, [parentId, id]], events.messageEvent('message.updated', parentId, inserted, [id]));
     }
     if (files.length) {
-      statements.push([
-        `UPDATE attachments SET message_id = ?, conversation_id = ? WHERE id IN (${files.map(() => '?').join(',')}) AND uploader_id = ? AND message_id IS NULL AND ${inserted}`,
-        [id, conv.id, ...files, user.id, id],
-      ]);
+      statements.push([`UPDATE attachments SET message_id = ?, conversation_id = ? WHERE id IN (${fileList}) AND uploader_id = ? AND message_id IS NULL AND ${inserted}`, [id, conv.id, ...files, user.id, id]]);
     }
     // Last, so the event snapshot includes the linked attachments.
     statements.push(events.messageEvent('message.created', id));
@@ -354,6 +364,7 @@ export function createChat({ db, events, audit }) {
     await db.batch(statements);
     events.notify();
     const stored = await db.get(`SELECT ${MESSAGE_JSON} AS json FROM messages m WHERE m.conversation_id = ? AND m.author_id = ? AND m.client_message_id = ?`, [conv.id, user.id, cid]);
+    if (!stored) throw appError('conflict', 'Attachment already used by another message', { reason: 'attachmentUsed' });
     const message = parseMessage(stored);
     return { message, duplicate: message.id !== id, mentioned };
   }
@@ -373,11 +384,18 @@ export function createChat({ db, events, audit }) {
     if (!text || text.length > MAX_BODY) throw appError('invalid', 'Invalid message');
     if (Number(version) !== msg.version) throw appError('stale_version', 'Message changed meanwhile');
     const mentioned = await mentionIds(conv.id, text);
+    const at = nowIso();
+    // Mentions, the event and the scrub of older event copies only apply if
+    // this edit is the one that won (version bumped by us, our text in place).
+    const won = 'EXISTS (SELECT 1 FROM messages WHERE id = ? AND version = ? AND body = ? AND edited_at = ?)';
+    const wonArgs = [msg.id, msg.version + 1, text, at];
     const results = await db.batch([
-      ['UPDATE messages SET body = ?, edited_at = ?, version = version + 1 WHERE id = ? AND version = ?', [text, nowIso(), msg.id, msg.version]],
-      ['DELETE FROM message_mentions WHERE message_id = ?', [msg.id]],
-      ...mentioned.map((uid) => ['INSERT INTO message_mentions (message_id, user_id, conversation_id, seq) VALUES (?, ?, ?, ?)', [msg.id, uid, conv.id, msg.seq]]),
-      events.messageEvent('message.updated', msg.id),
+      ['UPDATE messages SET body = ?, edited_at = ?, version = version + 1 WHERE id = ? AND version = ?', [text, at, msg.id, msg.version]],
+      [`DELETE FROM message_mentions WHERE message_id = ? AND ${won}`, [msg.id, ...wonArgs]],
+      ...mentioned.map((uid) => [`INSERT OR IGNORE INTO message_mentions (message_id, user_id, conversation_id, seq) SELECT ?, ?, ?, ? WHERE ${won}`, [msg.id, uid, conv.id, msg.seq, ...wonArgs]]),
+      // Earlier event copies must not keep serving the old text.
+      [`UPDATE events SET data = json_set(data, '$.body', ?) WHERE conversation_id = ? AND type IN ('message.created', 'message.updated') AND json_extract(data, '$.id') = ? AND ${won}`, [text, conv.id, msg.id, ...wonArgs]],
+      events.messageEvent('message.updated', msg.id, won, wonArgs),
     ]);
     if (!results[0].changes) throw appError('stale_version', 'Message changed meanwhile');
     events.notify();
@@ -393,6 +411,13 @@ export function createChat({ db, events, audit }) {
       ["UPDATE messages SET body = '', deleted_at = ?, pinned_at = NULL, version = version + 1 WHERE id = ?", [nowIso(), msg.id]],
       ['DELETE FROM message_mentions WHERE message_id = ?', [msg.id]],
       ['DELETE FROM reactions WHERE message_id = ?', [msg.id]],
+      // Files go with the message (the trigger queues the stored bytes for
+      // deletion), and earlier event copies lose the text and file list.
+      ['DELETE FROM attachments WHERE message_id = ?', [msg.id]],
+      [
+        `UPDATE events SET data = json_set(data, '$.body', '', '$.attachments', json('[]')) WHERE conversation_id = ? AND type IN ('message.created', 'message.updated') AND json_extract(data, '$.id') = ?`,
+        [conv.id, msg.id],
+      ],
       events.messageEvent('message.updated', msg.id),
       ...(moderated ? [audit.statement({ orgId: org.id, actor: user, action: 'message.moderate_delete', resourceType: 'message', resourceId: msg.id, ip, data: { conversation: conv.id, author: msg.author_id } })] : []),
     ]);

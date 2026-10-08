@@ -41,14 +41,25 @@ export function createEvents({ db, nodeId, cluster, pollMs = 400 }) {
   }
 
   // A message.created / message.updated event whose payload is the message
-  // row as committed (only inserted if that message exists).
-  function messageEvent(type, messageId) {
+  // row as committed (only inserted if that message exists, and `guard` —
+  // an SQL condition — holds).
+  function messageEvent(type, messageId, guard = '1', guardArgs = []) {
     return [
       `INSERT INTO events (org_id, conversation_id, user_id, type, data, node_id, created_at)
-       SELECT m.org_id, m.conversation_id, NULL, ?, ${MESSAGE_JSON}, ?, ? FROM messages m WHERE m.id = ?`,
-      [type, nodeId, nowIso(), messageId],
+       SELECT m.org_id, m.conversation_id, NULL, ?, ${MESSAGE_JSON}, ?, ? FROM messages m WHERE m.id = ? AND ${guard}`,
+      [type, nodeId, nowIso(), messageId, ...guardArgs],
     ];
   }
+
+  // Delivers events strictly in order and advances the cursor only after an
+  // event was handed over. A failure (e.g. the membership lookup) is retried
+  // with backoff; after MAX_ATTEMPTS the event is skipped and the
+  // organization's clients are told to reload (onGiveUp), since one of them
+  // may already hold a later event id and would never sync this one.
+  const MAX_ATTEMPTS = 5;
+  let attempts = 0;
+  let retryTimer = null;
+  let giveUp = () => {};
 
   async function pump() {
     if (pumping) {
@@ -61,12 +72,26 @@ export function createEvents({ db, nodeId, cluster, pollMs = 400 }) {
         again = false;
         const rows = await db.all('SELECT * FROM events WHERE id > ? ORDER BY id LIMIT 1000', [cursor]);
         for (const row of rows) {
-          cursor = row.id;
+          const event = { ...row, data: JSON.parse(row.data) };
           try {
-            await deliver({ ...row, data: JSON.parse(row.data) });
+            await deliver(event);
+            attempts = 0;
           } catch (err) {
-            console.error('Event delivery failed:', err.message);
+            if (++attempts < MAX_ATTEMPTS) {
+              console.error(`Event ${row.id} delivery failed (attempt ${attempts}), retrying:`, err.message);
+              clearTimeout(retryTimer);
+              retryTimer = setTimeout(pump, 200 * 2 ** attempts);
+              return;
+            }
+            console.error(`Event ${row.id} skipped after ${attempts} attempts:`, err.message);
+            attempts = 0;
+            try {
+              giveUp(event);
+            } catch {
+              // Best effort.
+            }
           }
+          cursor = row.id;
         }
         if (rows.length === 1000) again = true;
       } while (again);
@@ -77,8 +102,9 @@ export function createEvents({ db, nodeId, cluster, pollMs = 400 }) {
     }
   }
 
-  async function start(onEvent) {
+  async function start(onEvent, onGiveUp = () => {}) {
     deliver = onEvent;
+    giveUp = onGiveUp;
     cursor = (await db.get('SELECT COALESCE(MAX(id), 0) AS id FROM events')).id;
     if (cluster) {
       timer = setInterval(pump, pollMs);
@@ -114,7 +140,10 @@ export function createEvents({ db, nodeId, cluster, pollMs = 400 }) {
     start,
     since,
     cursor: () => cursor,
-    stop: () => clearInterval(timer),
+    stop: () => {
+      clearInterval(timer);
+      clearTimeout(retryTimer);
+    },
     // Retention of the replay log; clients older than this do a full reload.
     prune: (days = 7) => db.run('DELETE FROM events WHERE created_at < ?', [new Date(Date.now() - days * 86400_000).toISOString()]),
   };

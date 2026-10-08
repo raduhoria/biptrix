@@ -49,6 +49,10 @@ export function createFiles({ db, config, policies }) {
     });
   }
 
+  // Bytes of uploads in progress on this node, per organization: concurrent
+  // uploads cannot each assume the whole remaining quota is theirs.
+  const inFlight = new Map();
+
   async function storageUsed(orgId) {
     return (await db.get('SELECT COALESCE(SUM(size), 0) AS bytes FROM attachments WHERE org_id = ?', [orgId])).bytes;
   }
@@ -62,7 +66,12 @@ export function createFiles({ db, config, policies }) {
     const limit = Math.min(config.maxUploadBytes, policy.max_file_mb * 1024 * 1024);
     const declared = Number(req.headers['content-length'] || 0);
     if (declared > limit) throw appError('invalid', 'File too large', { reason: 'size', max: Math.round(limit / 1048576) });
-    if ((await storageUsed(org.id)) + declared > org.storage_quota_mb * 1048576) throw appError('quota_exceeded', 'Storage quota reached', { reason: 'storage' });
+    // The quota is enforced on the bytes actually received (Content-Length
+    // may be absent or wrong), against what is stored plus uploads already
+    // running here; the final insert re-checks it atomically in the DB.
+    const quota = org.storage_quota_mb * 1048576;
+    const room = quota - (await storageUsed(org.id)) - (inFlight.get(org.id) || 0);
+    if (room <= 0 || declared > room) throw appError('quota_exceeded', 'Storage quota reached', { reason: 'storage' });
 
     const id = newId();
     const key = `${org.id}/${id}`;
@@ -72,10 +81,13 @@ export function createFiles({ db, config, policies }) {
     const hash = createHash('sha256');
     let size = 0;
     let head = Buffer.alloc(0);
+    const reserve = (n) => inFlight.set(org.id, Math.max(0, (inFlight.get(org.id) || 0) + n));
     const meter = new Transform({
       transform(chunk, enc, cb) {
         size += chunk.length;
+        reserve(chunk.length);
         if (size > limit) return cb(appError('invalid', 'File too large', { reason: 'size', max: Math.round(limit / 1048576) }));
+        if (size > room) return cb(appError('quota_exceeded', 'Storage quota reached', { reason: 'storage' }));
         if (head.length < 16) head = Buffer.concat([head, chunk.subarray(0, 16)]);
         hash.update(chunk);
         cb(null, chunk);
@@ -89,16 +101,30 @@ export function createFiles({ db, config, policies }) {
       await avScan(temp);
       await rename(temp, target);
     } catch (err) {
+      reserve(-size);
       await unlink(temp).catch(() => {});
       throw err;
     }
-    await db.batch([
-      ['INSERT INTO attachments (id, org_id, uploader_id, name, mime, size, sha256, storage_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [id, org.id, user.id, name, mime, size, hash.digest('hex'), key, nowIso()]],
-      [
-        'INSERT INTO usage_counters (org_id, period, metric, value) VALUES (?, ?, ?, ?) ON CONFLICT(org_id, period, metric) DO UPDATE SET value = value + excluded.value',
-        [org.id, nowIso().slice(0, 7), 'upload_bytes', size],
-      ],
-    ]);
+    // Atomic quota check across nodes: the row is only inserted if it still
+    // fits; otherwise the bytes are removed and the upload refused.
+    const fits = `(SELECT COALESCE(SUM(size), 0) FROM attachments WHERE org_id = ?) + ? <= (SELECT storage_quota_mb * 1048576 FROM organizations WHERE id = ?)`;
+    let results;
+    try {
+      results = await db.batch([
+        [`INSERT INTO attachments (id, org_id, uploader_id, name, mime, size, sha256, storage_key, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${fits}`, [id, org.id, user.id, name, mime, size, hash.digest('hex'), key, nowIso(), org.id, size, org.id]],
+        [
+          `INSERT INTO usage_counters (org_id, period, metric, value) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM attachments WHERE id = ?)
+           ON CONFLICT(org_id, period, metric) DO UPDATE SET value = value + excluded.value`,
+          [org.id, nowIso().slice(0, 7), 'upload_bytes', size, id],
+        ],
+      ]);
+    } finally {
+      reserve(-size);
+    }
+    if (!results[0].changes) {
+      await unlink(target).catch(() => {});
+      throw appError('quota_exceeded', 'Storage quota reached', { reason: 'storage' });
+    }
     return { id, name, mime, size };
   }
 
@@ -126,15 +152,30 @@ export function createFiles({ db, config, policies }) {
     await pipeline(createReadStream(full), res);
   }
 
-  // Uploads never attached to a message are removed after a day.
+  // Uploads never attached to a message are dropped after a day (their bytes
+  // go through the deletion queue like every other removed attachment).
   async function pruneOrphans() {
     const cutoff = new Date(Date.now() - 86400_000).toISOString();
-    const rows = await db.all('SELECT id, storage_key FROM attachments WHERE message_id IS NULL AND created_at < ? LIMIT 500', [cutoff]);
-    for (const row of rows) {
-      await unlink(path.join(root, row.storage_key)).catch(() => {});
-      await db.run('DELETE FROM attachments WHERE id = ?', [row.id]);
-    }
+    await db.run('DELETE FROM attachments WHERE message_id IS NULL AND created_at < ?', [cutoff]);
   }
 
-  return { upload, send, storageUsed, pruneOrphans };
+  // Deletion queue (file_deletions, filled by a trigger on attachments):
+  // unlink the bytes, then clear the entry. A failed unlink other than
+  // "already gone" stays queued for the next run.
+  async function processDeletions() {
+    const rows = await db.all('SELECT storage_key FROM file_deletions ORDER BY created_at LIMIT 1000');
+    for (const { storage_key: key } of rows) {
+      const full = path.resolve(root, key);
+      if (!full.startsWith(root + path.sep)) continue;
+      try {
+        await unlink(full);
+      } catch (err) {
+        if (err.code !== 'ENOENT') continue;
+      }
+      await db.run('DELETE FROM file_deletions WHERE storage_key = ?', [key]);
+    }
+    return rows.length;
+  }
+
+  return { upload, send, storageUsed, pruneOrphans, processDeletions };
 }

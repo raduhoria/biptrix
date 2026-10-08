@@ -35,7 +35,7 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
   router.get(api('/conversations'), ...member, async (req, res) => res.json({ conversations: await chat.list(req.org, req.user) }));
 
   router.get(api('/conversations/:id'), ...member, async (req, res) => {
-    const one = await chat.one(conv(req), req.user);
+    const one = await chat.one(req.org, conv(req), req.user);
     if (!one) throw appError('not_found', 'Conversation not found');
     res.json({ conversation: one });
   });
@@ -53,7 +53,7 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
       parentId: body.parent_id || null,
       attachmentIds: body.attachment_ids || [],
     });
-    if (!result.duplicate) notifier.afterSend(req.org, req.user, await chat.one(conv(req), req.user), result.message, result.mentioned).catch(() => {});
+    if (!result.duplicate) notifier.afterSend(req.org, req.user, await chat.one(req.org, conv(req), req.user), result.message, result.mentioned).catch(() => {});
     res.json({ status: 'persisted', duplicate: result.duplicate, message: result.message });
   });
 
