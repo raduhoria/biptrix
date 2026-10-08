@@ -52,7 +52,7 @@ export async function createApp(config, { quiet = false } = {}) {
   const policies = createPolicies({ db, audit });
   const chat = createChat({ db, events, audit, policies });
   const files = createFiles({ db, config, policies });
-  const meetings = createMeetings({ db, policies, audit, appSecret });
+  const meetings = createMeetings({ db, policies, audit, appSecret, events });
   const media = createMedia(config);
   configureEmails({ name: config.smtp.fromName, url: config.appUrl });
   const mailer = createMailer({ smtp: config.smtp, quiet });
@@ -143,6 +143,7 @@ export async function createApp(config, { quiet = false } = {}) {
       await auth.pruneExpired();
       await loginCodes.prune();
       await calls.sweep();
+      await meetings.closeExpired();
       for (const r of await orgs.expireCollaborators()) realtime.disconnectUser(r.user_id, r.org_id);
       await events.prune(7);
       await files.pruneOrphans();

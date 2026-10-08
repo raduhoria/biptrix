@@ -184,4 +184,35 @@ describe('in-call chat and calls', () => {
     bws.ws.close();
     a.ws.ws.close();
   });
+  test('an ended call stops offering "Join": the card shows how it ended, live', async () => {
+    const card = (meetingId) => app.db.get("SELECT meta, version FROM messages WHERE conversation_id = ? AND kind = 'meeting' AND json_extract(meta, '$.meeting_id') = ?", [dm.id, meetingId]).then((r) => ({ ...JSON.parse(r.meta), version: r.version }));
+    // Missed (earlier test): the card says so.
+    const missedId = (await app.db.get("SELECT id FROM meetings WHERE ring_state = 'missed' ORDER BY created_at LIMIT 1")).id;
+    assert.deepEqual([(await card(missedId)).state, (await card(missedId)).outcome], ['ended', 'missed']);
+
+    // Ended by the host, with a duration; open chat sockets get message.updated.
+    const bobWs = await chatSocket(bobClient);
+    const meeting = (await anaClient.post(`${API()}/meetings`, { json: { conversation_id: dm.id, notify_members: false, call: 'video' } })).data.meeting;
+    const a = await room(anaClient, meeting.id, 'Ana');
+    await room(bobClient, meeting.id, 'Bob');
+    await app.db.run('UPDATE meetings SET started_at = ? WHERE id = ?', [new Date(Date.now() - 125_000).toISOString(), meeting.id]);
+    assert.equal((await anaClient.post(`${API()}/meetings/${meeting.id}/end`, { json: {} })).status, 200);
+    const updated = await bobWs.next('message.updated', 3000, (m) => m.data.meta?.meeting_id === meeting.id);
+    assert.equal(updated.data.meta.state, 'ended');
+    assert.equal(updated.data.meta.outcome, 'answered');
+    assert.ok(updated.data.meta.duration_s >= 124 && updated.data.meta.duration_s <= 127);
+    assert.equal(updated.data.version, 2);
+    // Closing again changes nothing.
+    await app.services.meetings.close(await app.services.meetings.byId(meeting.id), { label: 'x' }, 'ended', null);
+    assert.equal((await card(meeting.id)).version, 2);
+
+    // Nobody ended it: past its end time, maintenance closes it.
+    const old = (await anaClient.post(`${API()}/meetings`, { json: { conversation_id: dm.id, notify_members: false } })).data.meeting;
+    await app.db.run('UPDATE meetings SET expires_at = ? WHERE id = ?', [new Date(Date.now() - 1000).toISOString(), old.id]);
+    await app.maintenance();
+    assert.equal((await card(old.id)).state, 'ended');
+    assert.equal((await app.db.get('SELECT state FROM meetings WHERE id = ?', [old.id])).state, 'ended');
+    a.ws.ws.close();
+    bobWs.ws.close();
+  });
 });

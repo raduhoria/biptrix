@@ -2,6 +2,7 @@ import { createTranslator } from './i18n.js';
 import { missedCallEmail } from '../views/emails.js';
 
 export const RING_MS = 45_000;
+const HANG_UP_GRACE_MS = 15_000;
 const MAX_RING = 20; // larger conversations get the meeting card, no ringing
 
 // createCalls: a call started from a DM or a group rings the other members.
@@ -105,9 +106,21 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
       if (meeting.call_kind && ws.ctx.user && ws.ctx.user.id !== meeting.host_id) await respond(meeting, ws.ctx.user, 'accept');
     },
     // The caller hung up while it was still ringing: a missed call.
+    // Otherwise a call ends like a phone call when everyone has left (after
+    // a short grace, so a dropped connection can come back).
     empty: async (meeting) => {
       const current = await meetings.byId(meeting.id);
-      if (current?.ring_state === 'ringing') await missed(current);
+      if (!current?.call_kind) return;
+      if (current.ring_state === 'ringing') return missed(current);
+      const timer = setTimeout(async () => {
+        try {
+          const now = await meetings.byId(meeting.id);
+          if (now && !rooms.live(meeting.id)) await meetings.close(now, { label: 'system' }, 'ended', null);
+        } catch (err) {
+          console.error('Call close failed:', err.message);
+        }
+      }, HANG_UP_GRACE_MS);
+      timer.unref?.();
     },
   });
 

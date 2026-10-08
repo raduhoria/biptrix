@@ -425,15 +425,32 @@ function messageHtml(m, prev, { thread = false } = {}) {
   </div>`;
 }
 
+// "m:ss" or "h:mm:ss".
+function fmtDuration(s) {
+  const h = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(mm).padStart(2, '0')}:${ss}` : `${mm}:${ss}`;
+}
+
+// A call card offers "Join" only while the call is on; afterwards it says
+// how it ended (the server updates the card when the meeting closes).
 function meetingCard(m) {
   const meta = m.meta || {};
   const call = meta.call ? `?call=${encodeURIComponent(meta.call)}` : '';
-  return `<div class="meeting-card card">
+  const over = meta.state === 'ended' || meta.state === 'canceled';
+  const started = t(meta.call === 'audio' ? 'audioCallStarted' : 'meetingStarted', { name: person(m.author_id).name });
+  let status = started;
+  if (over) {
+    status =
+      meta.state === 'canceled' ? t('callCanceled') : meta.outcome === 'missed' ? t('callMissed') : meta.outcome === 'declined' ? t('callDeclinedShort') : meta.duration_s ? t('callEndedAfter', { duration: fmtDuration(meta.duration_s) }) : t('callEnded');
+  }
+  return `<div class="meeting-card card${over ? ' ended' : ''}">
     <div class="card-body d-flex align-items-center gap-3">
-      <span class="meeting-ic">${icon(meta.call === 'audio' ? 'phone' : 'video')}</span>
+      <span class="meeting-ic">${icon(over ? 'phone-off' : meta.call === 'audio' ? 'phone' : 'video')}</span>
       <div class="flex-grow-1 min-w-0"><div class="fw-semibold text-truncate">${esc(meta.title || m.body)}</div>
-        <div class="small text-body-secondary">${esc(t(meta.call === 'audio' ? 'audioCallStarted' : 'meetingStarted', { name: person(m.author_id).name }))}</div></div>
-      <a class="btn btn-success btn-sm" href="/o/${esc(ORG.slug)}/meet/${esc(meta.meeting_id)}${call}" target="_blank" rel="noopener">${esc(t('joinCall'))}</a>
+        <div class="small text-body-secondary">${esc(status)}</div></div>
+      ${over ? '' : `<a class="btn btn-success btn-sm" href="/o/${esc(ORG.slug)}/meet/${esc(meta.meeting_id)}${call}" target="_blank" rel="noopener">${esc(t('joinCall'))}</a>`}
     </div>
   </div>`;
 }
@@ -1261,7 +1278,8 @@ function showProfile(anchor, id) {
         ${job ? `<div class="small text-body-secondary text-truncate">${esc(job)}</div>` : ''}
         <div class="small text-body-secondary">${esc(t(`status.${state.presence[id] || 'offline'}`))}</div></div>
     </div>
-    ${p.email ? `<a class="d-block small text-truncate mt-2" href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : ''}
+    ${p.email ? `<div class="d-flex align-items-center gap-1 mt-2 min-w-0"><a class="small text-truncate" href="mailto:${esc(p.email)}">${esc(p.email)}</a>
+      <button class="btn btn-icon btn-sm profile-copy" data-copy="${esc(p.email)}" data-copied="emailCopied" title="${esc(t('copyEmail'))}" aria-label="${esc(t('copyEmail'))}">${icon('copy')}</button></div>` : ''}
     ${
       others
         ? `<div class="d-flex gap-2 mt-3">
@@ -1603,7 +1621,7 @@ document.addEventListener('click', async (e) => {
   }
   if (el.dataset.copy) {
     await navigator.clipboard.writeText(el.dataset.copy).catch(() => {});
-    return toast(t('linkCopied'), 'success');
+    return toast(t(el.dataset.copied || 'linkCopied'), 'success');
   }
   if (el.dataset.manage) return manageMeeting(el.dataset.manage);
   const action = el.dataset.action;
