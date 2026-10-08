@@ -1,7 +1,7 @@
 import { WebSocketServer } from 'ws';
 import { parseCookies } from './router.js';
 import { createRateLimiter } from './rate-limit.js';
-import { clientIp } from './http.js';
+import { clientIp, isSecure, originMatches } from './http.js';
 
 const PROTOCOL = 1;
 const HEARTBEAT_MS = 25_000;
@@ -11,15 +11,8 @@ const PRESENCE = new Set(['online', 'away', 'dnd']);
 
 // Origin check on upgrade (spec §14): only pages served by this app may open
 // a socket with the user's cookies.
-export function originAllowed(req, appUrl) {
-  const origin = req.headers.origin;
-  if (!origin) return false;
-  try {
-    const { host } = new URL(origin);
-    return host === req.headers.host || host === new URL(appUrl).host;
-  } catch {
-    return false;
-  }
+export function originAllowed(req, appUrl, trustProxy = false) {
+  return !!req.headers.origin && originMatches(req.headers.origin, req, appUrl, isSecure(req, trustProxy));
 }
 
 // createRealtime: the chat WebSocket (/ws?org=<slug>). One socket per tab,
@@ -38,8 +31,17 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
   const presence = new Map(); // `${orgId}:${userId}` → status
   const limiter = createRateLimiter();
 
+  // A collaborator's access can expire while the socket is open: from that
+  // moment nothing more is delivered and the socket closes, without waiting
+  // for the periodic re-check or the maintenance sweep.
+  const expired = (ws) => {
+    const until = ws.ctx?.membership?.access_expires_at;
+    return !!until && until <= new Date().toISOString();
+  };
   const send = (ws, type, data, extra = {}) => {
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ v: PROTOCOL, type, ...extra, data }));
+    if (ws.readyState !== ws.OPEN) return;
+    if (expired(ws)) return ws.close(CLOSE_REVOKED, 'revoked');
+    ws.send(JSON.stringify({ v: PROTOCOL, type, ...extra, data }));
   };
 
   function addSocket(ws) {
@@ -199,7 +201,7 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
   async function handleUpgrade(req, socket, head) {
     try {
       const url = new URL(req.url, 'http://localhost');
-      if (!originAllowed(req, config.appUrl)) return reject(socket, '403 Forbidden');
+      if (!originAllowed(req, config.appUrl, config.trustProxy)) return reject(socket, '403 Forbidden');
       req.cookies = parseCookies(req.headers.cookie);
       req.ip = clientIp(req, config.trustProxy);
       if (url.pathname === '/ws/meeting') {

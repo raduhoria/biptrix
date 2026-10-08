@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { readForm } from '../core/router.js';
 import { LOCALE_COOKIE, normalizeLocale, translateError } from '../core/i18n.js';
 import { newTotpSecret, totpUri, verifyTotp } from '../core/totp.js';
-import { canonicalEmail, isoIn, newId, newToken, nowIso, sha256 } from '../core/util.js';
+import { canonicalEmail, isEmail, isoIn, newId, newToken, nowIso, sha256 } from '../core/util.js';
 import { accountView, codeLoginView, forgotView, inviteView, loginView, mfaLoginView, orgPickerView, resetView, setupView } from '../views/auth.js';
 import { messagePage } from '../views/layout.js';
 import { loginCodeEmail, resetEmail } from '../views/emails.js';
@@ -71,8 +71,14 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const form = await readForm(req);
     const email = canonicalEmail(form.get('email'));
     const next = safeNext(form.get('next'), '/');
-    const fail = (key, status = 401) => res.status(status).send(loginView({ t: req.t, email, next, error: req.t(key) }));
-    if ((await auth.tooManyFailures(`acct:${email}`, 8)) || (await auth.tooManyFailures(`ip:${req.ip}`, 40))) return fail('auth.tooMany', 429);
+    const fail = (key, status = 401) => res.status(status).send(loginView({ t: req.t, email: email.slice(0, 254), next, error: req.t(key) }));
+    if (await auth.tooManyFailures(`ip:${req.ip}`, 40)) return fail('auth.tooMany', 429);
+    // Not an address: refused before any per-account key is stored.
+    if (!isEmail(email)) {
+      await auth.recordFailure(`ip:${req.ip}`);
+      return fail('auth.invalid');
+    }
+    if (await auth.tooManyFailures(`acct:${email}`, 8)) return fail('auth.tooMany', 429);
     const user = await users.byEmail(email);
     const creds = user && (await users.credentials(user.id));
     const ok = creds?.password_hash && user.status === 'active' && (await auth.verifyPassword(form.get('password') || '', creds.password_hash));
@@ -89,7 +95,8 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
 
   // ------------------------------------------------- passwordless sign-in
   // E-mail → 6-digit code → session. The answer is the same whether or not
-  // the address has an account. MFA, when enabled, still follows.
+  // the address has an account, and whether or not a code was really sent
+  // (per-account limits are silent). MFA, when enabled, still follows.
   router.get('/login/code', (req, res) => {
     if (req.user) return res.redirect(safeNext(req.query.next));
     res.send(codeLoginView({ t: req.t, email: req.query.email || '', next: safeNext(req.query.next, '') }));
@@ -99,32 +106,38 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const form = await readForm(req);
     const email = canonicalEmail(form.get('email'));
     const next = safeNext(form.get('next'), '/');
+    if (!isEmail(email)) return res.status(400).send(codeLoginView({ t: req.t, next, error: req.t('errors.invalidEmail') }));
     if (await auth.tooManyFailures(`code-ip:${req.ip}`, 30)) return res.status(429).send(codeLoginView({ t: req.t, email, next, error: req.t('auth.tooMany') }));
     await auth.recordFailure(`code-ip:${req.ip}`);
     const user = await users.byEmail(email);
-    let notice = req.t('auth.codeSent', { email });
     if (user?.status === 'active') {
       try {
         const code = await loginCodes.issue(user.id);
         mailer.queue({ to: user.email, ...loginCodeEmail({ t: req.t, code }) });
       } catch (err) {
-        if (err.details?.reason === 'wait') notice = req.t('guest.wait', { seconds: err.details.seconds });
-        else if (err.code === 'rate_limited') return res.status(429).send(codeLoginView({ t: req.t, email, next, error: req.t('auth.tooMany') }));
+        if (err.code !== 'rate_limited') throw err;
       }
     }
-    res.send(codeLoginView({ t: req.t, email, next, step: 'code', notice }));
+    res.send(codeLoginView({ t: req.t, email, next, step: 'code', notice: req.t('auth.codeSent', { email }) }));
   });
 
   router.post('/login/code/verify', async (req, res) => {
     const form = await readForm(req);
     const email = canonicalEmail(form.get('email'));
     const next = safeNext(form.get('next'), '/');
-    const fail = (key, status = 401) => res.status(status).send(codeLoginView({ t: req.t, email, next, step: 'code', error: req.t(key) }));
+    const fail = (key, status = 401) => res.status(status).send(codeLoginView({ t: req.t, email: email.slice(0, 254), next, step: 'code', error: req.t(key) }));
+    // Per address and per IP, both checked before anything is written; a
+    // malformed address stores nothing.
+    if (await auth.tooManyFailures(`code-verify-ip:${req.ip}`, 30)) return fail('auth.tooMany', 429);
+    if (!isEmail(email)) {
+      await auth.recordFailure(`code-verify-ip:${req.ip}`);
+      return fail('auth.badCode');
+    }
     if (await auth.tooManyFailures(`acct:${email}`, 8)) return fail('auth.tooMany', 429);
     const user = await users.byEmail(email);
     const result = user?.status === 'active' ? await loginCodes.verify(user.id, form.get('code')) : 'invalid';
     if (result !== 'ok') {
-      await auth.recordFailure(`acct:${email}`);
+      await auth.recordFailure(`acct:${email}`, `code-verify-ip:${req.ip}`);
       return fail(result === 'expired' ? 'guest.otpExpired' : result === 'locked' ? 'guest.otpLocked' : 'auth.badCode');
     }
     await auth.clearFailures(`acct:${email}`);
@@ -192,17 +205,25 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     res.send(resetView({ t: req.t, token: req.params.token }));
   });
 
+  // The token is consumed in the same batch that changes the password, and
+  // every statement requires it to be still unused: of two concurrent
+  // requests with one token, only one changes anything.
   router.post('/reset/:token', async (req, res) => {
+    const gone = () => res.status(410).send(messagePage({ t: req.t, title: req.t('auth.resetTitle'), message: req.t('errors.expired'), back: '/forgot' }));
     const row = await resetToken(req.params.token);
-    if (!row) return res.status(410).send(messagePage({ t: req.t, title: req.t('auth.resetTitle'), message: req.t('errors.expired'), back: '/forgot' }));
+    if (!row) return gone();
     try {
       const hash = await auth.hashPassword(auth.validatePassword((await readForm(req)).get('password')));
-      await db.batch([
-        ['UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?', [hash, nowIso(), row.user_id]],
-        ['UPDATE email_tokens SET used_at = ? WHERE id = ?', [nowIso(), row.id]],
-        ['DELETE FROM sessions WHERE user_id = ?', [row.user_id]],
-        audit.statement({ actor: { id: row.user_id }, action: 'auth.password_reset', resourceType: 'user', resourceId: row.user_id, ip: req.ip }),
+      const at = nowIso();
+      const valid = 'EXISTS (SELECT 1 FROM email_tokens WHERE id = ? AND used_at IS NULL AND expires_at > ?)';
+      const validArgs = [row.id, at];
+      const [changed] = await db.batch([
+        [`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND ${valid}`, [hash, at, row.user_id, ...validArgs]],
+        [`DELETE FROM sessions WHERE user_id = ? AND ${valid}`, [row.user_id, ...validArgs]],
+        audit.statement({ actor: { id: row.user_id }, action: 'auth.password_reset', resourceType: 'user', resourceId: row.user_id, ip: req.ip }, valid, validArgs),
+        ['UPDATE email_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL', [at, row.id]],
       ]);
+      if (!changed.changes) return gone();
       realtime.disconnectUser(row.user_id);
       res.redirect('/login?notice=passwordReset');
     } catch (err) {
@@ -252,11 +273,11 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
   });
 
   // ---------------------------------------------------------------- account
-  async function renderAccount(req, res, { notice = '', error = '', mfaSetup = null, status = 200 } = {}) {
+  async function renderAccount(req, res, { notice = '', error = '', mfaSetup = null, codeSent = false, status = 200 } = {}) {
     const sessions = await db.all('SELECT id_hash, ip, user_agent, last_seen_at FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen_at DESC LIMIT 20', [req.user.id, nowIso()]);
     const list = await orgs.forUser(req.user.id);
     const hasPassword = !!(await users.credentials(req.user.id))?.password_hash;
-    res.status(status).send(accountView({ t: req.t, user: req.user, orgs: list, sessions, currentHash: req.session.id_hash, notice, error, mfaSetup, hasPassword, next: safeNext(req.query.next, '') }));
+    res.status(status).send(accountView({ t: req.t, user: req.user, orgs: list, sessions, currentHash: req.session.id_hash, notice, error, mfaSetup, hasPassword, codeSent, next: safeNext(req.query.next, '') }));
   }
 
   router.get('/account', requireUser, (req, res) => {
@@ -270,27 +291,51 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     res.redirect('/account?notice=saved');
   });
 
+  // Accounts created without a password (e-mail code sign-in) set their
+  // first one with a fresh code sent to their address instead of a current
+  // password: the session alone is not enough (otherwise a stolen session
+  // could set a password, then enroll the attacker's MFA factor).
+  router.post('/account/password/code', requireUser, async (req, res) => {
+    if ((await users.credentials(req.user.id))?.password_hash) return res.redirect('/account');
+    try {
+      const code = await loginCodes.issue(req.user.id);
+      mailer.queue({ to: req.user.email, ...loginCodeEmail({ t: req.t, code }) });
+    } catch (err) {
+      if (err.code !== 'rate_limited') throw err;
+      return renderAccount(req, res, { error: req.t('account.codeWait'), codeSent: true, status: 429 });
+    }
+    renderAccount(req, res, { notice: req.t('account.codeSent', { email: req.user.email }), codeSent: true });
+  });
+
   router.post('/account/password', requireUser, async (req, res) => {
     const form = await readForm(req);
     try {
       const creds = await users.credentials(req.user.id);
-      // Accounts created without a password (e-mail code sign-in) set their
-      // first one without a current password.
-      if (creds.password_hash && !(await auth.verifyPassword(form.get('current') || '', creds.password_hash))) return renderAccount(req, res, { error: req.t('account.wrongPassword'), status: 400 });
-      await users.setPasswordHash(req.user.id, await auth.hashPassword(auth.validatePassword(form.get('password'))));
+      const password = auth.validatePassword(form.get('password'));
+      if (creds.password_hash) {
+        if (!(await auth.verifyPassword(form.get('current') || '', creds.password_hash))) return renderAccount(req, res, { error: req.t('account.wrongPassword'), status: 400 });
+        await users.setPasswordHash(req.user.id, await auth.hashPassword(password));
+      } else {
+        const result = await loginCodes.verify(req.user.id, form.get('code'));
+        if (result !== 'ok') return renderAccount(req, res, { error: req.t(result === 'expired' ? 'guest.otpExpired' : result === 'locked' ? 'guest.otpLocked' : 'auth.badCode'), codeSent: result === 'invalid', status: 400 });
+        // Conditional: never overwrites a password set meanwhile.
+        const [set] = await db.batch([['UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND password_hash IS NULL', [await auth.hashPassword(password), nowIso(), req.user.id]]]);
+        if (!set.changes) return renderAccount(req, res, { error: req.t('account.wrongPassword'), status: 409 });
+      }
       await auth.destroyUserSessions(req.user.id, req.session.id_hash);
       await audit.log({ actor: req.user, action: 'auth.password_change', resourceType: 'user', resourceId: req.user.id, ip: req.ip });
       res.redirect('/account?notice=passwordChanged');
     } catch (err) {
-      renderAccount(req, res, { error: translateError(req.t, err), status: 400 });
+      renderAccount(req, res, { error: translateError(req.t, err), codeSent: true, status: 400 });
     }
   });
 
   // MFA enrollment: the pending secret lives in a short-lived encrypted
   // cookie bound to this account until the first code proves the
   // authenticator app has it. Enabling needs the current password (a stolen
-  // session alone cannot install an attacker's factor) and is refused while
-  // a factor is already active — that one must be removed first, with its code.
+  // session alone cannot install an attacker's factor; a passwordless account
+  // first sets one with a code from its e-mail) and is refused while a
+  // factor is already active — that one must be removed first, with its code.
   const pendingSecret = (req) => {
     try {
       const [userId, secret] = secretBox.decrypt(req.cookies[MFA_COOKIE]).split(':');

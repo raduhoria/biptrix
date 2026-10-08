@@ -22,6 +22,7 @@ import { createRealtime } from './core/realtime.js';
 import { createRouter, parseCookies } from './core/router.js';
 import { createSecretBox, loadAppSecret } from './core/secrets.js';
 import { createUsers } from './core/users.js';
+import { configureEmails } from './views/emails.js';
 import { messagePage } from './views/layout.js';
 
 import { registerAdminRoutes } from './routes/admin.js';
@@ -52,6 +53,7 @@ export async function createApp(config, { quiet = false } = {}) {
   const files = createFiles({ db, config, policies });
   const meetings = createMeetings({ db, policies, audit, appSecret });
   const media = createMedia(config);
+  configureEmails({ name: config.smtp.fromName, url: config.appUrl });
   const mailer = createMailer({ smtp: config.smtp, quiet });
   const loginCodes = createLoginCodes({ db, secret: appSecret });
   const rooms = createRooms({ auth, orgs, meetings, media });
@@ -123,13 +125,14 @@ export async function createApp(config, { quiet = false } = {}) {
   });
   server.on('upgrade', (req, socket, head) => realtime.handleUpgrade(req, socket, head));
 
-  // Housekeeping: expired sessions/tokens, the event replay window, orphan
+  // Housekeeping: expired sessions/tokens/login codes, the event replay window, orphan
   // uploads, message retention per policy, the file deletion queue, WAL
   // checkpoint. Retention also removes the copies of deleted messages kept
   // in the event log, so no text outlives the policy there either.
   async function maintenance() {
     try {
       await auth.pruneExpired();
+      await loginCodes.prune();
       for (const r of await orgs.expireCollaborators()) realtime.disconnectUser(r.user_id, r.org_id);
       await events.prune(7);
       await files.pruneOrphans();

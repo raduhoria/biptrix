@@ -117,4 +117,4 @@ parameter (consistent hash).
 - F4: simulcast (lower resolution for thumbnails in large meetings).
 - F5: cross-node presence and typing, rqlite load tests, billing.
 - P1/P2: SSO (OIDC/SAML), external calendar, recordings, native apps.
-- Backup: `db.backup()` (`VACUUM INTO`) exists; the orchestration script and restore test are not written yet.
+- Backup: a backup script (database, files, secret, with a restore check); rqlite deployments use rqlite's own backups.

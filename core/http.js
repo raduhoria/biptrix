@@ -43,15 +43,20 @@ export function securityHeaders(res, secure) {
 
 // CSRF (spec §14): state-changing requests must come from our own pages.
 // Browsers always send Origin on cross-site POST/PUT/DELETE; when present it
-// must match this host. Requests without Origin and Referer (curl, scripts)
-// carry no ambient browser cookies in practice and are allowed.
-export function sameOrigin(req, appUrl) {
-  const source = req.headers.origin || req.headers.referer;
-  if (!source) return true;
+// must be this app's origin — scheme, host and port, not just the host (an
+// http:// page on the same host is another origin). Requests without Origin
+// and Referer (curl, scripts) carry no ambient browser cookies in practice
+// and are allowed.
+export function originMatches(source, req, appUrl, secure) {
   try {
-    const { host } = new URL(source);
-    return host === req.headers.host || host === new URL(appUrl).host;
+    const { origin } = new URL(source);
+    return origin === new URL(appUrl).origin || origin === `${secure ? 'https' : 'http'}://${req.headers.host}`;
   } catch {
     return false;
   }
+}
+
+export function sameOrigin(req, appUrl) {
+  const source = req.headers.origin || req.headers.referer;
+  return !source || originMatches(source, req, appUrl, req.secure);
 }

@@ -29,7 +29,7 @@ export function registerPlatformRoutes(router, { auth, orgs, users, audit, realt
     const org = await orgs.create({ name: form.get('name'), ownerId: owner?.id || null, actor: req.user, ip: req.ip });
     if (!owner) {
       const inv = await orgs.invite(org, { email, role: 'owner' }, { ...req.user, orgRole: 'owner' }, req.ip);
-      mailer.queue({ to: email, ...orgInviteEmail({ t: req.t, org: org.name, inviter: req.user.name, url: `${config.appUrl}/invite/${inv.token}` }) });
+      mailer.queue({ to: email, ...orgInviteEmail({ t: req.t, org: org.name, inviter: req.user.name, role: 'owner', url: `${config.appUrl}/invite/${inv.token}` }) });
     }
     res.redirect('/platform?notice=orgCreated');
   });
