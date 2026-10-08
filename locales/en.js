@@ -233,6 +233,8 @@ export default {
     invite_ttl_hours: 'Invitation validity (hours)',
     guest_otp_required: 'Guests confirm their address with an e-mailed one-time code (recommended)',
     guest_lobby_required: 'Guests wait in the lobby until the host admits them',
+    media_sfu_allowed: 'Calls with more than 6 people may go through Cloudflare SFU',
+    media_sfu_help: 'Up to 6 people, calls are always peer-to-peer and encrypted between participants. Above that they move, without interruption, to Cloudflare SFU, which can technically see the audio/video. Turned off, calls stay end-to-end encrypted and are limited to 6 people.',
     guest_screen_share: 'External guests may share their screen',
     domain_allowlist: 'Allowed domains (empty = any)',
     domain_denylist: 'Blocked domains',

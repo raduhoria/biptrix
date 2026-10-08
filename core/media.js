@@ -8,13 +8,18 @@ const TURN_TTL_S = 4 * 3600;
 //   - Cloudflare Realtime TURN (CF_TURN_KEY_ID + CF_TURN_API_TOKEN), or
 //   - coturn with use-auth-secret (TURN_URLS + TURN_SECRET, TURN REST scheme),
 //   - otherwise the static ICE_SERVERS (STUN only → no relay behind strict NAT).
-// Topology: 'sfu' (Cloudflare Realtime SFU, core/sfu.js; capacity from the
-// org policy) or 'mesh' (peer-to-peer, up to MESH_MAX_PARTICIPANTS).
+// Topology (MEDIA_TOPOLOGY): 'mesh' — peer-to-peer only, up to
+// MESH_MAX_PARTICIPANTS; 'sfu' — always through Cloudflare Realtime SFU
+// (core/sfu.js); 'auto' (default) — peer-to-peer, moved to the SFU while a
+// call has more than MESH_MAX_PARTICIPANTS people (core/meeting-rooms.js).
+// Peer-to-peer media is encrypted between the participants (a TURN relay
+// only forwards it); through the SFU, Cloudflare terminates it. Without SFU
+// credentials, or where the org policy forbids the SFU, it is always mesh.
 export function createMedia(config) {
-  const { iceServers, cfTurnKeyId, cfTurnApiToken, turnUrls, turnSecret, meshMax, forceRelay, topology, sfuAppId, sfuAppToken } = config.media;
+  const { iceServers, cfTurnKeyId, cfTurnApiToken, turnUrls, turnSecret, meshMax, forceRelay, topology, sfuAppId, sfuAppToken, sfuReturnMs } = config.media;
   const sfu = createSfu({ appId: sfuAppId, appToken: sfuAppToken });
   if (topology === 'sfu' && !sfu.enabled) throw new Error('MEDIA_TOPOLOGY=sfu requires CF_SFU_APP_ID and CF_SFU_APP_TOKEN');
-  const chosen = topology === 'mesh' || !sfu.enabled ? 'mesh' : 'sfu';
+  const chosen = !sfu.enabled ? 'mesh' : topology === 'mesh' || topology === 'sfu' ? topology : 'auto';
 
   async function cloudflare() {
     const res = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${cfTurnKeyId}/credentials/generate-ice-servers`, {
@@ -47,5 +52,5 @@ export function createMedia(config) {
 
   // forceRelay (MEDIA_FORCE_RELAY=1): clients use relay candidates only —
   // for testing TURN / restrictive-NAT behavior (spec §18, criterion 24).
-  return { iceServersFor, topology: chosen, sfu, meshMax, icePolicy: forceRelay ? 'relay' : 'all' };
+  return { iceServersFor, topology: chosen, sfu, meshMax, sfuReturnMs, icePolicy: forceRelay ? 'relay' : 'all' };
 }

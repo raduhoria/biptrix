@@ -55,6 +55,7 @@ export function loadConfig(env = process.env) {
       turnUrls: list(env.TURN_URLS),
       turnSecret: env.TURN_SECRET || '',
       meshMax: Number(env.MESH_MAX_PARTICIPANTS) || 6,
+      sfuReturnMs: Number(env.MEDIA_SFU_RETURN_MS) || 20_000,
       forceRelay: env.MEDIA_FORCE_RELAY === '1',
       // auto = SFU when Cloudflare SFU credentials are set, mesh otherwise.
       topology: ['mesh', 'sfu'].includes(env.MEDIA_TOPOLOGY) ? env.MEDIA_TOPOLOGY : 'auto',

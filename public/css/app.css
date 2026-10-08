@@ -311,6 +311,7 @@
 .tile { position: relative; background: #1f2128; border-radius: .9rem; overflow: hidden; min-height: 0; outline: 3px solid transparent; transition: outline-color .2s; }
 .tile.speaking { outline-color: #22c55e; }
 .tile video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+.tile .tile-cover { position: absolute; inset: 0; z-index: 1; }
 .tile.self-tile video { transform: scaleX(-1); }
 .tile.screen-tile video { object-fit: contain; }
 .tile-avatar { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; }

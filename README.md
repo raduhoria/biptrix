@@ -91,8 +91,28 @@ parameter (consistent hash).
 - `MEDIA_FORCE_RELAY=1` (test only) forces all media through TURN, to simulate a
   restrictive NAT (criterion 24). Tested with two Chrome browsers through
   Cloudflare TURN: video both ways and screen share.
-- **Topology** (`MEDIA_TOPOLOGY=auto`): Cloudflare Realtime SFU when
-  `CF_SFU_APP_ID` / `CF_SFU_APP_TOKEN` are set, otherwise a peer-to-peer mesh.
+- **Topology** (`MEDIA_TOPOLOGY`):
+  - `auto` (default): peer-to-peer while a call has up to
+    `MESH_MAX_PARTICIPANTS` (6) people; when one more joins, the room moves to
+    Cloudflare Realtime SFU, and back to peer-to-peer once it fits again (after
+    `MEDIA_SFU_RETURN_MS`, 20 s). Moves are make-before-break: the server says
+    `topology`, every client builds the new path while the old one still
+    plays, switches each track once media flows on it (video through a cover
+    element, so the decoder restart is not seen), then closes the old path.
+    The room socket never drops. Measured with three browsers and the real
+    SFU: about 0.2 s of video freeze at a move, nobody disconnected.
+  - Peer-to-peer, each participant sends its picture once per other person,
+    so each copy is capped as the call grows (setParameters, no
+    renegotiation): 2 people 720p ~1.5 Mbps; 3–4 people ~540p 800 kbps; 5–6
+    people ~360p 400 kbps — about 2 Mbps of upload in total at any size.
+  - `mesh`: always peer-to-peer (capped at the mesh size); `sfu`: always SFU.
+  - Without `CF_SFU_APP_ID` / `CF_SFU_APP_TOKEN` it is always mesh.
+  - **Privacy.** Peer-to-peer media is encrypted between the participants
+    (DTLS-SRTP); a TURN relay only forwards it. Through the SFU, Cloudflare
+    terminates the media. The org policy "calls above 6 people may go through
+    Cloudflare SFU" (`media_sfu_allowed`) turned off keeps every call of that
+    organization peer-to-peer, capped at 6 (it is fixed per meeting when the
+    meeting is created).
   - **SFU** (`core/sfu.js`): one session per participant. Every push and pull
     goes through `/ws/meeting` and the server, so the token never reaches the
     browser and a pull only works between admitted participants of the same

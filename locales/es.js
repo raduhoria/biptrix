@@ -233,6 +233,8 @@ export default {
     invite_ttl_hours: 'Validez de la invitación (horas)',
     guest_otp_required: 'Los invitados confirman su dirección con un código de un solo uso enviado por correo (recomendado)',
     guest_lobby_required: 'Los invitados esperan en la sala de espera hasta que el anfitrión los admita',
+    media_sfu_allowed: 'Las llamadas de más de 6 personas pueden pasar por Cloudflare SFU',
+    media_sfu_help: 'Hasta 6 personas, las llamadas son siempre peer-to-peer y cifradas entre participantes. Por encima pasan, sin cortes, a Cloudflare SFU, que técnicamente puede ver el audio/vídeo. Desactivado, las llamadas siguen cifradas entre participantes y se limitan a 6 personas.',
     guest_screen_share: 'Los invitados externos pueden compartir su pantalla',
     domain_allowlist: 'Dominios permitidos (vacío = cualquiera)',
     domain_denylist: 'Dominios bloqueados',

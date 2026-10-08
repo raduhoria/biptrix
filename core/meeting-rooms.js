@@ -52,14 +52,43 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ v: PROTOCOL, type, data, re }));
   };
 
+  // Topology per room. mode (fixed for the room): 'mesh', 'sfu', or 'auto'
+  // — peer-to-peer while the call fits MESH_MAX_PARTICIPANTS, moved to the
+  // SFU when one more person joins, back to peer-to-peer once it is small
+  // again (after MEDIA_SFU_RETURN_MS, default 20 s, so a 6↔7 coming and going does not flap).
+  // A move is announced with `topology`; clients build the new media path
+  // before closing the old one, so nobody is disconnected. The org policy
+  // media_sfu_allowed=false keeps a meeting peer-to-peer (and caps its size).
   function room(meeting) {
     let r = rooms.get(meeting.id);
     if (!r) {
-      r = { meeting, peers: new Map(), lobby: new Map(), topology: media.topology };
+      const sfuAllowed = JSON.parse(meeting.policy_snapshot || '{}').media_sfu_allowed !== false;
+      const mode = sfuAllowed ? media.topology : 'mesh';
+      r = { meeting, peers: new Map(), lobby: new Map(), mode, topology: mode === 'sfu' ? 'sfu' : 'mesh', backTimer: null };
       rooms.set(meeting.id, r);
     }
     r.meeting = meeting;
     return r;
+  }
+
+  function switchTopology(r, topology) {
+    clearTimeout(r.backTimer);
+    r.backTimer = null;
+    if (r.topology === topology) return;
+    console.log(`Meeting ${r.meeting.id}: ${r.topology} → ${topology} (${r.peers.size} in the room)`);
+    r.topology = topology;
+    broadcast(r, 'topology', { topology });
+  }
+
+  // After someone left an auto room on the SFU: back to peer-to-peer if it
+  // stays small.
+  function maybeReturnToMesh(r) {
+    if (r.mode !== 'auto' || r.topology !== 'sfu' || !r.peers.size || r.peers.size > media.meshMax || r.backTimer) return;
+    r.backTimer = setTimeout(() => {
+      r.backTimer = null;
+      if (rooms.get(r.meeting.id) === r && r.topology === 'sfu' && r.peers.size && r.peers.size <= media.meshMax) switchTopology(r, 'mesh');
+    }, media.sfuReturnMs);
+    r.backTimer.unref?.();
   }
 
   const peerInfo = (ws) => ({ id: ws.participant.id, name: ws.participant.display_name, role: ws.participant.role, guest: !ws.participant.user_id, media: ws.media, tracks: ws.sfu?.published || {} });
@@ -141,20 +170,32 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
     }
     r.lobby.delete(participant.id);
     const policy = JSON.parse(meeting.policy_snapshot || '{}');
-    const capacity = r.topology === 'sfu' ? policy.max_participants || 25 : Math.min(media.meshMax, policy.max_participants || media.meshMax);
+    // Everything that waits on the database or the network first: from the
+    // moment this connection is in r.peers until `joined` and `peer.joined`
+    // are sent nothing may wait, or someone joining at the same moment
+    // could hear of this participant before this participant hears it is
+    // in — and two clients would disagree on who connects to whom.
+    const canManage = !!ws.ctx.user && (await meetings.canManage(meeting, ws.ctx.user, ws.ctx.orgRole));
+    const chatState = await chatFor(ws, meeting);
+    const iceServers = await media.iceServersFor(participant.id);
+    if (ws.readyState !== ws.OPEN) return;
+    const capacity = r.mode === 'mesh' ? Math.min(media.meshMax, policy.max_participants || media.meshMax) : policy.max_participants || 25;
     // Re-joining from a second tab replaces the first.
     const previous = r.peers.get(participant.id);
     if (previous && previous !== ws) closeWith(previous, 'replaced');
     else if (r.peers.size >= capacity) return send(ws, 'error', { code: 'room_full', max: capacity });
+    // One more than peer-to-peer can carry: the room moves to the SFU first.
+    if (r.mode === 'auto' && !previous && r.peers.size + 1 > media.meshMax) switchTopology(r, 'sfu');
+    else if (r.backTimer && r.peers.size + 1 > media.meshMax) {
+      clearTimeout(r.backTimer);
+      r.backTimer = null;
+    }
     r.peers.set(participant.id, ws);
     ws.joinedAt = Date.now();
-    if (r.peers.size === 1) await meetings.markLive(meeting);
-    const canManage = !!ws.ctx.user && (await meetings.canManage(meeting, ws.ctx.user, ws.ctx.orgRole));
-    const chatState = await chatFor(ws, meeting);
     send(ws, 'joined', {
       self: peerInfo(ws),
       peers: [...r.peers.values()].filter((p) => p !== ws).map(peerInfo),
-      ice_servers: await media.iceServersFor(participant.id),
+      ice_servers: iceServers,
       topology: r.topology,
       ice_policy: media.icePolicy,
       can_manage: canManage,
@@ -164,6 +205,7 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
       call: meeting.call_kind ? { kind: meeting.call_kind, ringing: meeting.ring_state === 'ringing' && meeting.ring_until > new Date().toISOString() } : null,
     });
     broadcast(r, 'peer.joined', peerInfo(ws), ws);
+    if (r.peers.size === 1) await meetings.markLive(meeting);
     if (canManage) lobbyUpdate(r);
     hooks.joined(meeting, ws).catch((err) => console.error('Call hook failed:', err.message));
   }
@@ -352,6 +394,15 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
           if (!inRoom || !ws.sfu) return;
           await media.sfu.close(ws.sfu.sessionId, (Array.isArray(data.mids) ? data.mids : []).map(String)).catch(() => {});
           return send(ws, 'sfu.ok', {}, id);
+        case 'sfu.leave': {
+          // Back on peer-to-peer: this participant's SFU session is done.
+          if (!inRoom || !ws.sfu) return send(ws, 'sfu.ok', {}, id);
+          const mids = Object.values(ws.sfu.pending).map((t) => t.mid);
+          if (mids.length) await media.sfu.close(ws.sfu.sessionId, mids).catch(() => {});
+          ws.sfu = null;
+          send(ws, 'sfu.ok', {}, id);
+          return broadcast(r, 'peer.tracks', { id: ws.participant.id, tracks: {} }, ws);
+        }
         case 'media': {
           if (!inRoom) return;
           const screen = !!data.screen && (!!ws.participant.user_id || !!JSON.parse(r.meeting.policy_snapshot || '{}').guest_screen_share);
@@ -426,7 +477,9 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
       r.peers.delete(ws.participant.id);
       broadcast(r, 'peer.left', { id: ws.participant.id });
       meetings.recordLeave(ws.participant.id, (Date.now() - ws.joinedAt) / 60_000, r.meeting.org_id).catch(() => {});
+      maybeReturnToMesh(r);
       if (!r.peers.size) {
+        clearTimeout(r.backTimer);
         meetings.markIdle(r.meeting.id).catch(() => {});
         if (!closing) hooks.empty(r.meeting).catch((err) => console.error('Call hook failed:', err.message));
       }

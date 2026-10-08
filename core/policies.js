@@ -11,6 +11,10 @@ export const DEFAULT_POLICY = {
   guest_otp_required: true,
   guest_lobby_required: true,
   guest_screen_share: false,
+  // Calls above the peer-to-peer limit may go through Cloudflare's SFU
+  // (which can see the media). Off: calls stay end-to-end encrypted between
+  // participants, and are limited to the peer-to-peer size.
+  media_sfu_allowed: true,
   max_invites_per_day: 100,
   max_meeting_minutes: 240,
   max_participants: 25,
