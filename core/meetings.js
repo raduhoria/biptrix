@@ -11,7 +11,7 @@ const ACTIVE = ['scheduled', 'open', 'live'];
 // guest e-mail OTP flow, guest sessions and the lobby (spec §8–9). Media
 // signaling lives in core/meeting-rooms.js; it calls back here for every
 // authorization decision.
-export function createMeetings({ db, policies, audit, appSecret }) {
+export function createMeetings({ db, policies, audit, appSecret, events }) {
   const otpHash = (invitationId, code) => createHmac('sha256', appSecret).update(`otp:${invitationId}:${code}`).digest('hex');
 
   // A meeting that is past its expiry is treated as ended everywhere.
@@ -299,16 +299,46 @@ export function createMeetings({ db, policies, audit, appSecret }) {
     return inv;
   }
 
-  // End or cancel: every join session and media path is invalidated.
+  // End or cancel: every join session and media path is invalidated, and
+  // the meeting's card in its conversation stops offering "Join" — it shows
+  // how the call ended (ended with its duration, missed, canceled), on every
+  // client at once (message.updated).
   async function close(meeting, actor, state, ip) {
     if (!isOpen(meeting)) return;
-    const at = nowIso();
+    await finish(meeting, state, nowIso(), audit.statement({ orgId: meeting.org_id, actor, action: state === 'canceled' ? 'meeting.cancel' : 'meeting.end', resourceType: 'meeting', resourceId: meeting.id, ip }));
+  }
+
+  async function finish(meeting, state, at, auditRow) {
+    const cards = meeting.conversation_id
+      ? await db.all("SELECT id FROM messages WHERE conversation_id = ? AND kind = 'meeting' AND json_extract(meta, '$.meeting_id') = ?", [meeting.conversation_id, meeting.id])
+      : [];
+    // Only the batch that really closes the meeting updates the cards.
+    const closedNow = 'EXISTS (SELECT 1 FROM meetings WHERE id = ? AND ended_at = ? AND state = ?)';
+    const closedArgs = [meeting.id, at, state];
     await db.batch([
-      ['UPDATE meetings SET state = ?, ended_at = ? WHERE id = ?', [state, at, meeting.id]],
+      ["UPDATE meetings SET state = ?, ended_at = ? WHERE id = ? AND state IN ('scheduled', 'open', 'live')", [state, at, meeting.id]],
       ['UPDATE guest_sessions SET revoked_at = ? WHERE meeting_id = ? AND revoked_at IS NULL', [at, meeting.id]],
       ["UPDATE meeting_participants SET state = 'left', left_at = COALESCE(left_at, ?) WHERE meeting_id = ? AND state IN ('lobby', 'admitted')", [at, meeting.id]],
-      audit.statement({ orgId: meeting.org_id, actor, action: state === 'canceled' ? 'meeting.cancel' : 'meeting.end', resourceType: 'meeting', resourceId: meeting.id, ip }),
+      ...(auditRow ? [auditRow] : []),
+      ...cards.flatMap(({ id }) => [
+        [
+          `UPDATE messages SET version = version + 1, meta = json_set(COALESCE(meta, '{}'),
+             '$.state', ?, '$.ended_at', ?, '$.outcome', (SELECT ring_state FROM meetings WHERE id = ?),
+             '$.duration_s', (SELECT CAST(ROUND((julianday(ended_at) - julianday(started_at)) * 86400) AS INTEGER) FROM meetings WHERE id = ? AND started_at IS NOT NULL))
+           WHERE id = ? AND ${closedNow}`,
+          [state, at, meeting.id, meeting.id, id, ...closedArgs],
+        ],
+        events.messageEvent('message.updated', id, closedNow, closedArgs),
+      ]),
     ]);
+    if (cards.length) events.notify();
+  }
+
+  // Meetings past their end time that nobody closed (maintenance).
+  async function closeExpired() {
+    const rows = await db.all("SELECT * FROM meetings WHERE state IN ('scheduled', 'open', 'live') AND expires_at < ? LIMIT 200", [nowIso()]);
+    for (const m of rows) await finish(m, 'ended', m.expires_at, null);
+    return rows.length;
   }
 
   async function markLive(meeting) {
@@ -395,6 +425,7 @@ export function createMeetings({ db, policies, audit, appSecret }) {
     removeParticipant,
     revokeInvitation,
     close,
+    closeExpired,
     markLive,
     markIdle,
     recordLeave,

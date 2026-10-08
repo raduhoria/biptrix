@@ -28,6 +28,19 @@ const MIGRATIONS = [
       'ALTER TABLE meetings ADD COLUMN ring_until TEXT',
     ],
   ],
+  // Call cards of meetings that ended before cards were updated on close
+  // (or simply ran past their end time) stop offering "Join".
+  [
+    5,
+    [
+      `UPDATE meetings SET state = 'ended', ended_at = expires_at WHERE state IN ('scheduled', 'open', 'live') AND expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+      `UPDATE messages SET version = version + 1, meta = json_set(COALESCE(messages.meta, '{}'),
+         '$.state', mt.state, '$.ended_at', mt.ended_at, '$.outcome', mt.ring_state,
+         '$.duration_s', CASE WHEN mt.started_at IS NOT NULL AND mt.ended_at IS NOT NULL THEN CAST(ROUND((julianday(mt.ended_at) - julianday(mt.started_at)) * 86400) AS INTEGER) END)
+       FROM meetings mt
+       WHERE messages.kind = 'meeting' AND mt.id = json_extract(messages.meta, '$.meeting_id') AND mt.state IN ('ended', 'canceled')`,
+    ],
+  ],
 ];
 
 export async function runMigrations(db) {
