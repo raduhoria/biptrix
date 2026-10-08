@@ -306,8 +306,10 @@
 .lobby-badge { position: relative; left: -1.2rem; top: -1.1rem; margin-right: -1rem; }
 
 .tiles { --cols: 1; --rows: 1; flex: 1; display: grid; gap: .6rem; padding: .3rem .8rem; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); min-height: 0; }
+/* Spotlight (a shared screen): the screen takes the visible height and
+   stays put; the other tiles are a 150px column that scrolls on its own. */
 .tiles.has-spotlight { grid-template-columns: minmax(0, 1fr) 240px; grid-auto-rows: 150px; overflow-y: auto; }
-.tiles.has-spotlight .tile.spotlight { grid-column: 1; grid-row: 1 / span 20; }
+.tiles.has-spotlight .tile.spotlight { grid-column: 1; grid-row: 1 / span var(--side, 1); align-self: start; position: sticky; top: 0; height: var(--stage-h, 100%); }
 .tile { position: relative; background: #1f2128; border-radius: .9rem; overflow: hidden; min-height: 0; outline: 3px solid transparent; transition: outline-color .2s; }
 .tile.speaking { outline-color: #22c55e; }
 .tile video { width: 100%; height: 100%; object-fit: cover; background: #000; }
@@ -349,6 +351,8 @@
 .meet .card { background: #16181e; color: #e5e7eb; }
 .meet .form-label { color: #cbd5e1; }
 @media (max-width: 760px) {
+  .tiles.has-spotlight { grid-template-columns: minmax(0, 1fr); }
+  .tiles.has-spotlight .tile.spotlight { grid-row: auto; position: static; height: 55vh; }
   .meet-panel { position: fixed; inset: auto 0 0 0; width: auto; max-height: 60vh; margin: 0; border-radius: 1rem 1rem 0 0; z-index: 40; }
   .tiles { --cols: 1 !important; }
   .ctrl { width: 2.55rem; height: 2.55rem; }
