@@ -285,9 +285,18 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     return renderAccount(req, res, { notice });
   });
 
+  // Profile: name and language. The language is saved on the account (used
+  // on every device and for the e-mails this person receives) and in the
+  // selector cookie, so it applies at once.
   router.post('/account/profile', requireUser, async (req, res) => {
-    const name = String((await readForm(req)).get('name') || '').trim();
+    const form = await readForm(req);
+    const name = String(form.get('name') || '').trim();
     if (name) await users.setName(req.user.id, name);
+    const locale = normalizeLocale(form.get('locale'));
+    if (locale) {
+      await users.setLocale(req.user.id, locale);
+      res.cookie(LOCALE_COOKIE, locale, { maxAgeSeconds: 365 * 86400, secure: req.secure });
+    }
     res.redirect('/account?notice=saved');
   });
 

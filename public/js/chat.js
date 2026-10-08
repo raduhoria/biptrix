@@ -26,6 +26,7 @@ const state = {
   presence: {},
   messages: new Map(), // convId → { list: [], hasMore: true, loaded: false }
   threads: new Map(), // parentId → { parent, list: [] }
+  threadLoad: null, // { parentId, arriving: [] } while a thread loads
   outbox: new Map(JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]')),
   typing: new Map(), // convId → Map<userId, expiresAt>
   reads: new Map(), // convId → Map<userId, seq>
@@ -322,20 +323,19 @@ async function openConversation(id, { push = true } = {}) {
   renderComposer('main');
   const cache = cacheFor(id);
   if (!cache.loaded || cache.stale) {
+    if (cache.load) cache.load.superseded = true;
     $('#msg-list').innerHTML = `<div class="msg-loading"><div class="spinner-border spinner-border-sm"></div></div>`;
     // Live messages arriving while the page loads are kept and merged into
-    // it, so the response cannot overwrite them.
-    const arrived = (cache.arriving = []);
-    let data;
-    try {
-      data = await api(`${API}/conversations/${id}/messages?limit=50`);
-    } finally {
-      cache.arriving = null;
-    }
-    if (state.current !== id) return;
+    // it, so the response cannot overwrite them. Only the newest load is
+    // installed: an older, overlapping one is dropped when it answers.
+    const load = (cache.load = { arriving: [] });
+    const data = await api(`${API}/conversations/${id}/messages?limit=50`).finally(() => {
+      if (cache.load === load) cache.load = null;
+    });
+    if (load.superseded || cache.load || state.current !== id) return;
     cache.list = data.messages;
     const oldest = data.has_more ? data.messages[0]?.seq ?? Infinity : -Infinity;
-    for (const m of arrived) if (m.seq >= oldest) upsert(cache.list, m);
+    for (const m of load.arriving) if (m.seq >= oldest) upsert(cache.list, m);
     cache.hasMore = data.has_more;
     cache.loaded = true;
     cache.stale = false;
@@ -553,13 +553,15 @@ function onMessage(m, created) {
   }
   const c = state.conversations.get(m.conversation_id);
   if (!c) return refreshConversation(m.conversation_id);
+  // A thread being loaded keeps its replies and parent updates for later.
+  if (state.threadLoad && (m.parent_id || m.id) === state.threadLoad.parentId) state.threadLoad.arriving.push(m);
   if (m.parent_id) {
     const th = state.threads.get(m.parent_id);
     if (th) upsert(th.list, m);
     if (state.thread === m.parent_id) renderThread();
   } else {
     const cache = state.messages.get(m.conversation_id);
-    if (cache?.arriving) cache.arriving.push(m);
+    if (cache?.load) cache.load.arriving.push(m);
     else if (cache?.loaded) upsert(cache.list, m);
   }
   // The thread may still be loading (no cache entry yet): openThread
@@ -963,9 +965,20 @@ async function openThread(parentId) {
   openPanel('thread', t('thread'));
   $('#panel-body').innerHTML = `<div class="msg-loading"><div class="spinner-border spinner-border-sm"></div></div>`;
   const c = state.conversations.get(state.current);
-  const data = await api(`${API}/conversations/${c.id}/messages?parent=${encodeURIComponent(parentId)}&limit=200`);
-  if (state.thread !== parentId) return;
-  state.threads.set(parentId, { parent: data.parent, list: data.messages });
+  // Same rule as conversations: events received meanwhile are merged, and
+  // only the newest load of the thread is installed.
+  const load = (state.threadLoad = { parentId, arriving: [] });
+  const data = await api(`${API}/conversations/${c.id}/messages?parent=${encodeURIComponent(parentId)}&limit=200`).finally(() => {
+    if (state.threadLoad === load) state.threadLoad = null;
+  });
+  if (state.threadLoad || state.thread !== parentId) return;
+  const thread = { parent: data.parent, list: data.messages };
+  for (const m of load.arriving) {
+    if (m.id === parentId) {
+      if (!thread.parent || (thread.parent.version || 0) <= m.version) thread.parent = m;
+    } else upsert(thread.list, m);
+  }
+  state.threads.set(parentId, thread);
   state.staged.thread = [];
   renderComposer('thread');
   renderThread();

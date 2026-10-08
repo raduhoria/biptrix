@@ -161,6 +161,8 @@ export default {
     emailCode: 'Código del correo',
     setPassword: 'Crear contraseña',
     mfaNeedsPassword: 'Primero crea una contraseña (sección de arriba) y después activa MFA.',
+    language: 'Idioma',
+    languageHelp: 'Se usa para la interfaz en todos tus dispositivos y para los correos que recibes.',
     sessions: 'Sesiones activas',
     thisDevice: 'Este dispositivo',
     signOutOthers: 'Cerrar las demás sesiones',

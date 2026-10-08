@@ -161,6 +161,8 @@ export default {
     emailCode: 'Code from the e-mail',
     setPassword: 'Set password',
     mfaNeedsPassword: 'Set a password first (section above), then turn on MFA.',
+    language: 'Language',
+    languageHelp: 'Used for the interface on all your devices and for the e-mails you receive.',
     sessions: 'Active sessions',
     thisDevice: 'This device',
     signOutOthers: 'Sign out other sessions',

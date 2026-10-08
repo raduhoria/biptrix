@@ -55,6 +55,25 @@ export function createAuth({ db, users, config, secretBox }) {
 
   const clearFailures = (key) => db.run('DELETE FROM auth_failures WHERE key = ?', [key]);
 
+  // takeAttempt([[key, max], ...]): reserves one attempt under every key at
+  // once, before the credential is checked, and only if all are below their
+  // limit — one atomic batch, so concurrent requests cannot all pass a count
+  // read beforehand. Returns a stamp (null when limited): a failed attempt
+  // just keeps its rows; release(stamp) gives them back after a success.
+  // The stamp sorts like the timestamp it starts with, so the window and
+  // pruning compare it as before; each statement excludes this call's own
+  // rows, so all of them see the same counts.
+  async function takeAttempt(limits) {
+    const stamp = `${nowIso()}~${newToken().slice(0, 12)}`;
+    const since = new Date(Date.now() - THROTTLE_WINDOW_MS).toISOString();
+    const under = limits.map(() => '(SELECT COUNT(*) FROM auth_failures WHERE key = ? AND created_at >= ? AND created_at != ?) < ?').join(' AND ');
+    const underArgs = limits.flatMap(([key, max]) => [key, since, stamp, max]);
+    const results = await db.batch(limits.map(([key]) => [`INSERT INTO auth_failures (key, created_at) SELECT ?, ? WHERE ${under}`, [key, stamp, ...underArgs]]));
+    return results.every((r) => r.changes) ? stamp : null;
+  }
+
+  const release = (stamp) => db.run('DELETE FROM auth_failures WHERE created_at = ?', [stamp]);
+
   // ---------------------------------------------------------------- sessions
 
   async function createSession(res, req, userId, { mfaOk = false } = {}) {
@@ -165,6 +184,8 @@ export function createAuth({ db, users, config, secretBox }) {
     recordFailure,
     tooManyFailures,
     clearFailures,
+    takeAttempt,
+    release,
     createSession,
     sessionFromToken,
     readToken,

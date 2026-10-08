@@ -1,4 +1,8 @@
+import { LOCALES } from '../core/i18n.js';
 import { alerts, authPage, escapeHtml, fmtDate, icon, page } from './layout.js';
+
+// Each language is named in itself, so anyone can find their own.
+const LANGUAGE_NAMES = { en: 'English', ro: 'Română', es: 'Español' };
 
 const field = ({ label, name, type = 'text', value = '', required = true, autocomplete = '', attrs = '', help = '' }) => `
   <div class="mb-3">
@@ -190,6 +194,9 @@ export function accountView({ t, user, orgs, sessions, currentHash, notice = '',
     <form method="post" action="/account/profile" class="row g-3">
       <div class="col-md-6"><label class="form-label" for="p-name">${escapeHtml(t('auth.name'))}</label><input class="form-control" id="p-name" name="name" value="${escapeHtml(user.name)}" required maxlength="80"></div>
       <div class="col-md-6"><label class="form-label">${escapeHtml(t('auth.email'))}</label><input class="form-control" value="${escapeHtml(user.email)}" disabled></div>
+      <div class="col-md-6"><label class="form-label" for="p-lang">${escapeHtml(t('account.language'))}</label>
+        <select class="form-select" id="p-lang" name="locale">${LOCALES.map((code) => `<option value="${code}" lang="${code}"${(user.locale || t.locale) === code ? ' selected' : ''}>${escapeHtml(LANGUAGE_NAMES[code] || code)}</option>`).join('')}</select>
+        <div class="form-text">${escapeHtml(t('account.languageHelp'))}</div></div>
       <div class="col-12"><button class="btn btn-primary">${escapeHtml(t('common.save'))}</button></div>
     </form>
   </div></section>
