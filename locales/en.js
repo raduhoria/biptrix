@@ -520,6 +520,9 @@ export default {
       internal: 'Something went wrong.',
     },
     meet: {
+      settings: 'Settings',
+      speaker: 'Speaker',
+      settingsHint: 'Changes apply at once, without leaving the call.',
       chat: 'Chat',
       chatNone: 'The chat of this call is its conversation, available only to its members.',
       chatPlaceholder: 'Message everyone in the call',

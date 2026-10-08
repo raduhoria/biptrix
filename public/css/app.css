@@ -324,8 +324,10 @@
 .meet-panel:not([hidden]) { display: flex; flex-direction: column; }
 .meet-tab { color: #cbd5e1; border-radius: .5rem; }
 .meet-tab:hover { color: #fff; background: #2a2d36; }
-.meet-panel[data-tab="people"] .meet-tab[data-tab="people"], .meet-panel[data-tab="chat"] .meet-tab[data-tab="chat"] { background: #2a2d36; color: #fff; }
-.meet-panel[data-tab="people"] .meet-chat, .meet-panel[data-tab="chat"] .meet-people { display: none; }
+.meet-panel[data-tab="people"] .meet-tab[data-tab="people"], .meet-panel[data-tab="chat"] .meet-tab[data-tab="chat"], .meet-panel[data-tab="settings"] .meet-tab[data-tab="settings"] { background: #2a2d36; color: #fff; }
+.meet-panel:not([data-tab="chat"]) .meet-chat, .meet-panel:not([data-tab="people"]) .meet-people, .meet-panel:not([data-tab="settings"]) .meet-settings { display: none !important; }
+.mic-meter { height: .3rem; border-radius: .2rem; background: #2a2d36; overflow: hidden; }
+.mic-meter span { display: block; height: 100%; width: 0; background: #22c55e; transition: width .1s; }
 .meet-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .meet-chat-list { flex: 1; overflow-y: auto; min-height: 8rem; display: flex; flex-direction: column; gap: .5rem; padding-right: .2rem; }
 .meet-msg { max-width: 92%; }
@@ -347,7 +349,13 @@
 @media (max-width: 760px) {
   .meet-panel { position: fixed; inset: auto 0 0 0; width: auto; max-height: 60vh; margin: 0; border-radius: 1rem 1rem 0 0; z-index: 40; }
   .tiles { --cols: 1 !important; }
-  .ctrl { width: 2.7rem; height: 2.7rem; }
+  .ctrl { width: 2.55rem; height: 2.55rem; }
+  .ctrl .ic { width: 1.2rem; height: 1.2rem; }
+  /* The bar never widens the page: tighter, and "end for everyone" wraps. */
+  .meet[data-stage="room"] .meet-bar { flex-wrap: wrap; gap: .35rem; padding: .5rem .5rem .8rem; }
+  .meet-bar [data-action="copy-link"] { display: none; }
+  .ctrl-leave { width: 3.1rem; }
+  .meet-panel { overflow-x: hidden; }
 }
 
 /* ------------------------------------------------------- incoming call */
