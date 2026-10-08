@@ -491,9 +491,9 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
 
   function attach(ws, ctx) {
     ws.ctx = ctx;
-    ws.alive = true;
+    ws.missedPongs = 0;
     ws.on('pong', () => {
-      ws.alive = true;
+      ws.missedPongs = 0;
     });
     ws.on('message', (raw) => onMessage(ws, raw.toString()));
     ws.on('close', () => onClose(ws));
@@ -527,11 +527,13 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
   const recheck = setInterval(async () => {
     for (const r of rooms.values()) {
       for (const ws of [...r.peers.values(), ...r.lobby.values()]) {
-        if (!ws.alive) {
+        // Dead only after two pings in a row went unanswered (~20 s): a
+        // single slow pong (mobile network, busy tab) must not end a call.
+        if (ws.missedPongs >= 2) {
           ws.terminate();
           continue;
         }
-        ws.alive = false;
+        ws.missedPongs += 1;
         ws.ping();
         const meeting = await currentMeeting(ws).catch(() => r.meeting);
         if (!meeting) closeWith(ws, 'ended');
