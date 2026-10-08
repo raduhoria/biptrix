@@ -80,6 +80,14 @@
 .org-avatar { --org: var(--brand); display: inline-flex; align-items: center; justify-content: center; width: 2.6rem; height: 2.6rem; border-radius: .7rem; background: var(--org); color: #fff; font-weight: 700; }
 .guest-meeting { display: flex; gap: .9rem; align-items: center; padding: .9rem 1rem; border-radius: .8rem; background: var(--brand-soft); }
 .guest-ic { width: 2.2rem; height: 2.2rem; color: var(--brand); }
+.auth-or { position: relative; text-align: center; margin: 1.1rem 0; font-size: .8rem; color: var(--bs-secondary-color); }
+.auth-or::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px solid var(--bs-border-color); }
+.auth-or span { position: relative; padding: 0 .6rem; background: var(--bs-body-bg); }
+.ext-badge { display: inline-flex; align-items: center; gap: .2rem; padding: 0 .4rem; border-radius: .35rem; background: rgba(217, 119, 6, .14); color: #b45309; font-size: .68rem; font-weight: 600; vertical-align: .1em; white-space: nowrap; }
+[data-bs-theme="dark"] .ext-badge { color: #fbbf24; }
+.ext-banner { display: flex; align-items: center; gap: .5rem; padding: .45rem 1.1rem; font-size: .8rem; background: rgba(217, 119, 6, .08); color: #92400e; border-bottom: 1px solid rgba(217, 119, 6, .2); }
+[data-bs-theme="dark"] .ext-banner { color: #fcd34d; }
+.ext-banner[hidden] { display: none; }
 .otp-input { font-size: 1.8rem; letter-spacing: .5rem; font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------- console */

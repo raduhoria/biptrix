@@ -22,7 +22,34 @@ export function loginView({ t, email = '', next = '', error = '', notice = '' })
         ${field({ label: t('auth.password'), name: 'password', type: 'password', autocomplete: 'current-password' })}
         ${submit(t('auth.signIn'))}
       </form>
+      <div class="auth-or"><span>${escapeHtml(t('auth.or'))}</span></div>
+      <a class="btn btn-outline-primary btn-lg w-100" href="/login/code${next ? `?next=${encodeURIComponent(next)}` : ''}">${escapeHtml(t('auth.useCode'))}</a>
       <div class="text-center mt-3"><a href="/forgot">${escapeHtml(t('auth.forgot'))}</a></div>`,
+  });
+}
+
+// Passwordless sign-in: e-mail, then the 6-digit code.
+export function codeLoginView({ t, email = '', next = '', step = 'email', error = '', notice = '' }) {
+  const body =
+    step === 'code'
+      ? `<form method="post" action="/login/code/verify">
+          <input type="hidden" name="next" value="${escapeHtml(next)}"><input type="hidden" name="email" value="${escapeHtml(email)}">
+          <label class="form-label" for="f-code">${escapeHtml(t('guest.codeLabel'))}</label>
+          <input class="form-control form-control-lg text-center otp-input mb-3" id="f-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required autofocus>
+          ${submit(t('auth.signIn'))}
+        </form>
+        <form method="post" action="/login/code" class="text-center mt-3"><input type="hidden" name="next" value="${escapeHtml(next)}"><input type="hidden" name="email" value="${escapeHtml(email)}"><button class="btn btn-link">${escapeHtml(t('guest.resend'))}</button></form>`
+      : `<form method="post" action="/login/code">
+          <input type="hidden" name="next" value="${escapeHtml(next)}">
+          ${field({ label: t('auth.email'), name: 'email', type: 'email', value: email, autocomplete: 'username', attrs: 'autofocus' })}
+          ${submit(t('auth.sendCode'))}
+        </form>`;
+  return authPage({
+    t,
+    title: t('auth.codeTitle'),
+    subtitle: escapeHtml(t('auth.codeSubtitle')),
+    path: '/login/code',
+    body: `${alerts({ notice, error })}${body}<div class="text-center mt-3"><a href="/login${next ? `?next=${encodeURIComponent(next)}` : ''}">${escapeHtml(t('auth.usePassword'))}</a></div>`,
   });
 }
 
@@ -42,7 +69,7 @@ export function mfaLoginView({ t, next = '', error = '' }) {
   });
 }
 
-export function setupView({ t, values = {}, error = '' }) {
+export function setupView({ t, values = {}, error = '', token = '' }) {
   return authPage({
     t,
     title: t('setup.title'),
@@ -50,6 +77,7 @@ export function setupView({ t, values = {}, error = '' }) {
     path: '/setup',
     body: `${alerts({ error })}
       <form method="post" action="/setup">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
         ${field({ label: t('setup.orgName'), name: 'org_name', value: values.org_name, attrs: 'autofocus' })}
         ${field({ label: t('auth.name'), name: 'name', value: values.name, autocomplete: 'name' })}
         ${field({ label: t('auth.email'), name: 'email', type: 'email', value: values.email, autocomplete: 'username' })}
@@ -96,24 +124,26 @@ export function inviteView({ t, invite, token, user, error = '' }) {
       ? `<div class="alert alert-warning">${escapeHtml(t('invite.otherAccount', { email: user.email }))}</div>
          <form method="post" action="/logout"><input type="hidden" name="next" value="/invite/${escapeHtml(token)}"><button class="btn btn-outline-secondary w-100">${escapeHtml(t('auth.signOut'))}</button></form>`
       : invite.has_account
-        ? `<p>${escapeHtml(t('invite.signInFirst'))}</p><a class="btn btn-primary btn-lg w-100" href="/login?next=${encodeURIComponent(`/invite/${token}`)}&email=${encodeURIComponent(invite.email)}">${escapeHtml(t('auth.signIn'))}</a>`
+        ? `<p>${escapeHtml(t('invite.signInFirst'))}</p><a class="btn btn-primary btn-lg w-100" href="/login/code?next=${encodeURIComponent(`/invite/${token}`)}&email=${encodeURIComponent(invite.email)}">${escapeHtml(t('auth.useCode'))}</a>
+           <a class="btn btn-link w-100 mt-1" href="/login?next=${encodeURIComponent(`/invite/${token}`)}&email=${encodeURIComponent(invite.email)}">${escapeHtml(t('auth.usePassword'))}</a>`
         : `<form method="post" action="/invite/${escapeHtml(token)}">
             ${field({ label: t('auth.email'), name: 'email_display', value: invite.email, required: false, attrs: 'disabled' })}
             ${field({ label: t('auth.name'), name: 'name', autocomplete: 'name', attrs: 'autofocus' })}
-            ${field({ label: t('auth.newPassword'), name: 'password', type: 'password', autocomplete: 'new-password', help: t('auth.passwordRule'), attrs: 'minlength="10"' })}
+            ${field({ label: t('invite.passwordOptional'), name: 'password', type: 'password', required: false, autocomplete: 'new-password', help: t('invite.passwordHelp'), attrs: 'minlength="10"' })}
             ${submit(t('invite.create'))}
           </form>`;
+  const external = invite.role === 'external';
   return authPage({
     t,
-    title: t('invite.title', { org: invite.org_name }),
-    subtitle: escapeHtml(t('invite.subtitle', { email: invite.email })),
+    title: invite.space_name ? t('invite.spaceTitle', { space: invite.space_name, org: invite.org_name }) : t('invite.title', { org: invite.org_name }),
+    subtitle: escapeHtml(`${t('invite.subtitle', { email: invite.email })}${external ? ` ${t('invite.externalNote')}` : ''}`),
     path: `/invite/${token}`,
     body: alerts({ error }) + body,
   });
 }
 
 // Account: profile, language, password, MFA, sessions.
-export function accountView({ t, user, orgs, sessions, currentHash, notice = '', error = '', mfaSetup = null, next = '' }) {
+export function accountView({ t, user, orgs, sessions, currentHash, notice = '', error = '', mfaSetup = null, next = '', hasPassword = true }) {
   const back = orgs[0] ? `/o/${orgs[0].slug}` : '/';
   const mfa = user.mfa_enabled
     ? `<p class="mb-3"><span class="badge text-bg-success">${icon('shield')} ${escapeHtml(t('account.mfaOn'))}</span></p>
@@ -165,10 +195,11 @@ export function accountView({ t, user, orgs, sessions, currentHash, notice = '',
   </div></section>
   <section class="card mb-4"><div class="card-body">
     <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('account.password'))}</h2>
+    ${hasPassword ? '' : `<p class="small text-body-secondary">${escapeHtml(t('account.noPassword'))}</p>`}
     <form method="post" action="/account/password" class="row g-3">
-      <div class="col-md-6"><label class="form-label" for="p-cur">${escapeHtml(t('account.currentPassword'))}</label><input class="form-control" id="p-cur" type="password" name="current" autocomplete="current-password" required></div>
+      ${hasPassword ? `<div class="col-md-6"><label class="form-label" for="p-cur">${escapeHtml(t('account.currentPassword'))}</label><input class="form-control" id="p-cur" type="password" name="current" autocomplete="current-password" required></div>` : ''}
       <div class="col-md-6"><label class="form-label" for="p-new">${escapeHtml(t('auth.newPassword'))}</label><input class="form-control" id="p-new" type="password" name="password" autocomplete="new-password" minlength="10" required><div class="form-text">${escapeHtml(t('auth.passwordRule'))}</div></div>
-      <div class="col-12"><button class="btn btn-primary">${escapeHtml(t('account.changePassword'))}</button></div>
+      <div class="col-12"><button class="btn btn-primary">${escapeHtml(t(hasPassword ? 'account.changePassword' : 'account.setPassword'))}</button></div>
     </form>
   </div></section>
   <section class="card mb-4" id="mfa"><div class="card-body">

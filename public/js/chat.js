@@ -41,6 +41,11 @@ const state = {
 const person = (id) => state.directory.get(id) || { id, name: t('unknownUser'), email: '' };
 const avatar = (id, size = '') => `<span class="avatar ${size}" style="--h:${hue(id)}">${esc(initials(person(id).name))}<span class="presence-dot ${state.presence[id] || 'offline'}"></span></span>`;
 const replyLabel = (n) => t(n === 1 ? 'replyOne' : 'replies', { n });
+// "extern · company.com" next to people from outside the organization.
+const extBadge = (id) => {
+  const p = person(id);
+  return p.role === 'external' ? ` <span class="ext-badge" title="${esc(t('externalTitle'))}">${esc(t('external'))} · ${esc((p.email || '').split('@')[1] || '')}</span>` : '';
+};
 const mentionHtml = (id) => `<span class="mention${id === ME ? ' mention-me' : ''}">@${esc(person(id).name)}</span>`;
 
 function convName(c) {
@@ -317,9 +322,19 @@ async function openConversation(id, { push = true } = {}) {
   const cache = cacheFor(id);
   if (!cache.loaded || cache.stale) {
     $('#msg-list').innerHTML = `<div class="msg-loading"><div class="spinner-border spinner-border-sm"></div></div>`;
-    const data = await api(`${API}/conversations/${id}/messages?limit=50`);
+    // Live messages arriving while the page loads are kept and merged into
+    // it, so the response cannot overwrite them.
+    const arrived = (cache.arriving = []);
+    let data;
+    try {
+      data = await api(`${API}/conversations/${id}/messages?limit=50`);
+    } finally {
+      cache.arriving = null;
+    }
     if (state.current !== id) return;
     cache.list = data.messages;
+    const oldest = data.has_more ? data.messages[0]?.seq ?? Infinity : -Infinity;
+    for (const m of arrived) if (m.seq >= oldest) upsert(cache.list, m);
     cache.hasMore = data.has_more;
     cache.loaded = true;
     cache.stale = false;
@@ -342,6 +357,15 @@ function renderHeader() {
     sub = `${t('memberCount', { n: c.member_count })}${c.description ? ` · ${c.description}` : ''}`;
   }
   $('#conv-sub').textContent = sub;
+  // Spaces with people from other companies say so, for everyone inside.
+  const banner = $('#ext-banner');
+  if (boot.role === 'external') {
+    banner.hidden = false;
+    banner.innerHTML = `${icon('globe')} ${esc(t('youAreExternal', { org: ORG.name }))}`;
+  } else {
+    banner.hidden = !(c.external_count > 0);
+    banner.innerHTML = c.external_count > 0 ? `${icon('globe')} ${esc(t(c.external_count === 1 ? 'externalBannerOne' : 'externalBanner', { n: c.external_count }))}` : '';
+  }
   const canEdit = c.type === 'group' || (c.type === 'space' && (c.my_role === 'moderator' || ['owner', 'admin'].includes(boot.role)));
   $('#conv-menu').innerHTML = [
     `<li><button class="dropdown-item" data-action="mute">${icon(c.muted ? 'bell' : 'bell-off')} ${esc(t(c.muted ? 'unmute' : 'mute'))}</button></li>`,
@@ -384,7 +408,7 @@ function messageHtml(m, prev, { thread = false } = {}) {
   return `<div class="msg${grouped ? ' grouped' : ''}${pending ? ' pending' : ''}${m.pinned_at ? ' pinned' : ''}${m.author_id === ME ? ' mine' : ''}" data-id="${esc(m.id)}" data-cid="${esc(m.client_message_id)}" data-seq="${m.seq || ''}">
     <div class="msg-gutter">${grouped ? `<span class="msg-time-hover">${esc(time)}</span>` : avatar(m.author_id)}</div>
     <div class="msg-main">
-      ${grouped ? '' : `<div class="msg-head"><strong>${esc(author.name)}</strong><span class="msg-time" title="${esc(new Date(m.created_at).toLocaleString())}">${esc(time)}</span>${m.pinned_at ? `<span class="msg-pin">${icon('pin')}</span>` : ''}</div>`}
+      ${grouped ? '' : `<div class="msg-head"><strong>${esc(author.name)}</strong>${extBadge(m.author_id)}<span class="msg-time" title="${esc(new Date(m.created_at).toLocaleString())}">${esc(time)}</span>${m.pinned_at ? `<span class="msg-pin">${icon('pin')}</span>` : ''}</div>`}
       ${body}${files}${reactHtml}${replies}${status}
     </div>
     ${actions}
@@ -534,7 +558,8 @@ function onMessage(m, created) {
     if (state.thread === m.parent_id) renderThread();
   } else {
     const cache = state.messages.get(m.conversation_id);
-    if (cache?.loaded) upsert(cache.list, m);
+    if (cache?.arriving) cache.arriving.push(m);
+    else if (cache?.loaded) upsert(cache.list, m);
   }
   // The thread may still be loading (no cache entry yet): openThread
   // fetches the current parent itself.
@@ -972,11 +997,17 @@ async function openMembers() {
   const { members } = await api(`${API}/conversations/${c.id}/members`);
   const moderator = canModerate();
   const canAdd = c.type === 'group' || (c.type === 'space' && (c.visibility === 'public' || moderator));
-  $('#panel-body').innerHTML = `${canAdd ? `<button class="btn btn-outline-primary btn-sm w-100 mb-3" data-action="add-members">${icon('user-plus')} ${esc(t('addPeople'))}</button>` : ''}
+  const canInviteEmail = c.type === 'space' && moderator;
+  const invites = canInviteEmail ? (await api(`${API}/conversations/${c.id}/invites`).catch(() => ({ invites: [] }))).invites : [];
+  $('#panel-body').innerHTML = `<div class="px-3">${canAdd ? `<button class="btn btn-outline-primary btn-sm w-100 mb-2" data-action="add-members">${icon('user-plus')} ${esc(t('addPeople'))}</button>` : ''}
+    ${canInviteEmail ? `<button class="btn btn-outline-secondary btn-sm w-100 mb-3" data-action="invite-email">${icon('mail')} ${esc(t('inviteByEmail'))}</button>` : ''}</div>
+    ${invites.length ? `<div class="side-label px-3">${esc(t('pendingInvites'))}</div><ul class="list-unstyled member-list mb-3">${invites
+      .map((i) => `<li class="d-flex align-items-center gap-2 py-1" data-invite="${esc(i.id)}">${icon('mail', 'text-body-tertiary')}<span class="min-w-0 flex-grow-1 text-truncate small">${esc(i.email)}</span><button class="btn btn-sm btn-link text-danger p-0" data-action="revoke-invite">${esc(t('revoke'))}</button></li>`)
+      .join('')}</ul>` : ''}
     <ul class="list-unstyled member-list">${members
       .map(
         (m) => `<li class="d-flex align-items-center gap-2 py-1" data-user="${esc(m.id)}">${avatar(m.id, 'avatar-sm')}
-        <div class="min-w-0 flex-grow-1"><div class="text-truncate">${esc(m.name)}${m.id === ME ? ` <small class="text-body-secondary">(${esc(t('you'))})</small>` : ''}</div><small class="text-body-secondary">${esc(m.role === 'moderator' ? t('moderator') : t(`status.${state.presence[m.id] || 'offline'}`))}</small></div>
+        <div class="min-w-0 flex-grow-1"><div class="text-truncate">${esc(m.name)}${m.id === ME ? ` <small class="text-body-secondary">(${esc(t('you'))})</small>` : ''}</div><small class="text-body-secondary">${esc(m.role === 'moderator' ? t('moderator') : t(`status.${state.presence[m.id] || 'offline'}`))}</small>${extBadge(m.id)}</div>
         ${m.id !== ME ? `<button class="btn btn-sm btn-icon" data-action="dm-user" title="${esc(t('message'))}">${icon('chat')}</button>` : ''}
         ${moderator && m.id !== ME ? `<div class="dropdown"><button class="btn btn-sm btn-icon" data-bs-toggle="dropdown">${icon('more')}</button><ul class="dropdown-menu dropdown-menu-end">
           <li><button class="dropdown-item" data-action="toggle-mod">${esc(t(m.role === 'moderator' ? 'removeModerator' : 'makeModerator'))}</button></li>
@@ -1036,7 +1067,7 @@ function pickerHtml({ multi, exclude = [] }) {
       .map(
         (p) => `<label class="list-group-item d-flex align-items-center gap-2" data-name="${esc(`${p.name} ${p.email}`.toLowerCase())}">
         <input class="form-check-input m-0" type="${multi ? 'checkbox' : 'radio'}" name="people" value="${esc(p.id)}">
-        ${avatar(p.id, 'avatar-sm')}<span class="min-w-0"><span class="d-block text-truncate">${esc(p.name)}</span><small class="text-body-secondary">${esc(p.title || p.email)}</small></span></label>`
+        ${avatar(p.id, 'avatar-sm')}<span class="min-w-0"><span class="d-block text-truncate">${esc(p.name)}${extBadge(p.id)}</span><small class="text-body-secondary">${esc(p.title || p.email)}</small></span></label>`
       )
       .join('') || `<div class="text-body-secondary p-3">${esc(t('noPeople'))}</div>`}</div>`;
 }
@@ -1203,6 +1234,23 @@ const modals = {
         await api(`${API}/conversations/${c.id}/members`, { method: 'POST', body: { user_ids: ids } });
       });
     });
+  },
+  'invite-email': () => {
+    const c = state.conversations.get(state.current);
+    openModal(
+      modalShell(
+        t('inviteByEmail'),
+        `<p class="small text-body-secondary">${esc(t('inviteByEmailHelp', { space: c.name }))}</p>
+        <label class="form-label">${esc(t('emailLabel'))}</label><input class="form-control" type="email" name="email" required placeholder="ion@firmapartenera.ro" autofocus>`,
+        t('invite')
+      ),
+      (root) =>
+        onModalSubmit(root, async (form) => {
+          const res = await api(`${API}/conversations/${c.id}/invite`, { method: 'POST', body: { email: form.email.value } });
+          toast(t(res.status === 'added' ? 'memberAdded' : 'inviteSent'), 'success');
+          if (state.panel === 'members') openMembers();
+        })
+    );
   },
   rename: () => {
     const c = state.conversations.get(state.current);
@@ -1411,6 +1459,14 @@ document.addEventListener('click', async (e) => {
       const uid = el.closest('[data-user]').dataset.user;
       return adopt((await api(`${API}/dms`, { method: 'POST', body: { user_id: uid } })).conversation);
     }
+    case 'revoke-invite':
+      try {
+        await api(`${API}/conversations/${c.id}/invites/${el.closest('[data-invite]').dataset.invite}/revoke`, { method: 'POST', body: {} });
+        openMembers();
+      } catch (err) {
+        toast(errorText(err), 'danger');
+      }
+      return;
     case 'toggle-mod':
     case 'remove-member': {
       const uid = el.closest('[data-user]').dataset.user;

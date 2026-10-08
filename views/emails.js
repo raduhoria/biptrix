@@ -65,3 +65,16 @@ export const mentionEmail = ({ t, org, author, conversation, preview, url }) =>
     button: t('email.mentionButton'),
     buttonUrl: url,
   });
+
+export const spaceInviteEmail = ({ t, org, inviter, space, url, days }) =>
+  frame({
+    t,
+    title: t('email.spaceInviteTitle', { space, org }),
+    intro: escapeHtml(t('email.spaceInviteIntro', { inviter, space, org })),
+    button: t('email.spaceInviteButton'),
+    buttonUrl: url,
+    outro: escapeHtml(`${t('email.expires7')} ${days ? t('email.spaceAccessDays', { days }) : ''}`.trim()),
+  });
+
+export const loginCodeEmail = ({ t, code }) =>
+  frame({ t, title: t('email.loginCodeTitle'), intro: escapeHtml(t('email.loginCodeIntro')), code, outro: escapeHtml(t('email.otpOutro')) });

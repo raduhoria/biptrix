@@ -22,7 +22,7 @@ designed to be sold as SaaS or self-hosted.
 npm install
 cp .env.example .env      # optional; every value has a default
 npm run dev               # http://localhost:3000 → /setup on first run
-npm test                  # 20 tests: isolation, idempotency, catch-up, guests, MFA…
+npm test                  # 38 tests: isolation, idempotency, catch-up, guests, MFA…
 ```
 
 The first run asks you to create the platform operator account and the first
@@ -42,6 +42,8 @@ to the console.
 | Search | FTS5 that ignores diacritics. Scoped to the caller's conversations. Filters: conversation, author, date. Also searches file names. |
 | Meetings | Instant or scheduled meetings, and calls from a DM or Space (posted as a card in the conversation). WebRTC mesh with lobby, host/co-host, admit, remove, end for all, screen share, device selection, active speaker. |
 | External guests | A personal link (only the token hash is stored) leads to an e-mailed OTP (rate limited, attempts counted), then a guest session bound to the meeting, then the lobby. Revoking or ending the meeting closes the sessions and the sockets. |
+| External collaborators | Space moderators (or admins only, per policy) invite people from other companies by e-mail straight into a Space. They get the `external` role with access that expires after N days (90 by default). They see only the conversations shared with them: no directory, no browsing, cannot create Spaces. Each person shows an "external · domain" badge, and a Space that contains them shows a banner. Access can be extended or revoked from the admin console. |
+| Passwordless sign-in | A 6-digit code sent by e-mail: stored as an HMAC, valid 10 minutes, single use, rate limited. MFA, when enabled, still follows. Accounts created from an invitation can have no password at all. |
 | Policies | Per organization and versioned: external invitations on/off, who may invite, allowed/blocked domains, OTP, lobby, guest screen share, daily limits, duration, participants, file size, retention, e-mail notifications. |
 | Administration | Organization console: members and invitations, roles, revocation (closes sockets), Spaces (archive), policies, audit. Operator console: tenants (create, suspend, limits), accounts (disable), health, platform audit. The operator has no access to tenant content. |
 | Operations | `/healthz`, `/readyz`. Usage counters per tenant and month. Hourly maintenance: expired sessions, the 7-day event window, orphan uploads, retention, WAL checkpoint. |

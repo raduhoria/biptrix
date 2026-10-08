@@ -1,11 +1,12 @@
 import { readJson } from '../core/router.js';
-import { appError } from '../core/util.js';
+import { appError, canonicalEmail, isEmail } from '../core/util.js';
+import { spaceInviteEmail } from '../views/emails.js';
 import { chatView } from '../views/app.js';
 
 // Chat pages and JSON API under /api/o/:org (spec §14). The WebSocket is the
 // primary path for sending (core/realtime.js); POST .../messages is the HTTP
 // fallback with the same idempotency contract.
-export function registerChatRoutes(router, { auth, orgs, chat, files, policies, realtime, events, notifier, config, meetings }) {
+export function registerChatRoutes(router, { auth, orgs, chat, files, policies, realtime, events, notifier, config, meetings, users, mailer, db }) {
   const member = [auth.requireUser, orgs.requireOrg];
 
   async function page(req, res) {
@@ -111,6 +112,52 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
     res.json({ ok: true });
   });
 
+  // External collaborators: invite someone by e-mail into a Space. A person
+  // already in the organization is simply added; anyone else gets an
+  // invitation as an external collaborator (only this Space, access
+  // expiring per policy) and joins the Space on acceptance.
+  const INVITES_PER_DAY = 50;
+  router.post(api('/conversations/:id/invite'), ...member, async (req, res) => {
+    const body = await readJson(req);
+    const email = canonicalEmail(body.email);
+    if (!isEmail(email)) throw appError('invalid', 'Invalid e-mail', { field: 'email' });
+    const space = await chat.requireConversation(req.org, req.user, conv(req));
+    if (space.type !== 'space' || space.archived_at) throw appError('invalid', 'Only Spaces accept external collaborators');
+    const policy = await policies.get(req.org.id);
+    const existing = await users.byEmail(email);
+    if (existing && (await orgs.membership(req.org.id, existing.id))) {
+      await chat.addMembers(req.org, req.user, role(req), space.id, [existing.id], req.ip);
+      return res.json({ status: 'added' });
+    }
+    policies.assertCanInviteCollaborator({ policy, orgRole: role(req), spaceRole: space.my_role, email });
+    const today = (await db.get('SELECT COUNT(*) AS n FROM org_invites WHERE invited_by = ? AND created_at >= ?', [req.user.id, new Date(Date.now() - 86400_000).toISOString()])).n;
+    if (today >= INVITES_PER_DAY) throw appError('rate_limited', 'Too many invitations today', { reason: 'dailyLimit' });
+    const inv = await orgs.invite(req.org, { email, role: 'external', conversationId: space.id, accessDays: policy.collaborator_access_days }, req.actor, req.ip);
+    mailer.queue({
+      to: email,
+      ...spaceInviteEmail({ t: req.t, org: req.org.name, inviter: req.user.name, space: space.name, url: `${config.appUrl}/invite/${inv.token}`, days: policy.collaborator_access_days }),
+    });
+    res.json({ status: 'invited' });
+  });
+
+  // Pending invitations of a Space, for those who can manage it.
+  async function spaceManager(req) {
+    const conv = await chat.requireConversation(req.org, req.user, req.params.id);
+    if (conv.type !== 'space' || !chat.canModerate(conv, role(req))) throw appError('forbidden', 'Only moderators');
+    return conv;
+  }
+  router.get(api('/conversations/:id/invites'), ...member, async (req, res) => {
+    const space = await spaceManager(req);
+    res.json({ invites: await orgs.spaceInvites(req.org.id, space.id) });
+  });
+  router.post(api('/conversations/:id/invites/:iid/revoke'), ...member, async (req, res) => {
+    const space = await spaceManager(req);
+    const inv = await db.get('SELECT id FROM org_invites WHERE id = ? AND org_id = ? AND conversation_id = ?', [req.params.iid, req.org.id, space.id]);
+    if (!inv) throw appError('not_found', 'Invitation not found');
+    await orgs.revokeInvite(req.org, inv.id, req.user, req.ip);
+    res.json({ ok: true });
+  });
+
   router.post(api('/dms'), ...member, async (req, res) => {
     res.json({ conversation: await chat.openDm(req.org, req.user, role(req), String((await readJson(req)).user_id || '')) });
   });
@@ -125,7 +172,7 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
     res.json({ conversation: await chat.createSpace(req.org, req.user, role(req), { name: body.name, description: body.description, visibility: body.visibility, memberIds: body.user_ids || [] }, req.ip) });
   });
 
-  router.get(api('/spaces'), ...member, async (req, res) => res.json({ spaces: await chat.browseSpaces(req.org, req.user) }));
+  router.get(api('/spaces'), ...member, orgs.requirePermission('spaces.browse'), async (req, res) => res.json({ spaces: await chat.browseSpaces(req.org, req.user) }));
 
   router.post(api('/spaces/:id/join'), ...member, async (req, res) => {
     res.json({ conversation: await chat.joinSpace(req.org, req.user, role(req), req.params.id) });

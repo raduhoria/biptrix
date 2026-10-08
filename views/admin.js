@@ -70,8 +70,11 @@ export function membersView({ t, req, members, invites, notice, error }) {
       : `<span class="badge text-bg-light border">${escapeHtml(t(`roles.${m.role}`))}</span>`,
     m.mfa_enabled ? `<span class="badge text-bg-success">MFA</span>` : '<span class="text-body-tertiary">—</span>',
     m.status === 'active' ? `<span class="badge text-bg-success-subtle text-success-emphasis">${escapeHtml(t('admin.active'))}</span>` : `<span class="badge text-bg-secondary">${escapeHtml(t('admin.revoked'))}</span>`,
-    fmtDate(m.created_at),
-    m.status === 'active' && m.id !== req.user.id
+    `${fmtDate(m.created_at)}${m.access_expires_at ? `<div class="small ${m.access_expires_at < new Date().toISOString() ? 'text-danger' : 'text-body-secondary'}">${escapeHtml(t('admin.accessUntil'))} ${fmtDate(m.access_expires_at)}</div>` : ''}`,
+    m.status === 'active' && m.id !== req.user.id && m.role === 'external'
+      ? `<div class="d-flex gap-1"><form method="post" action="/o/${escapeHtml(org.slug)}/admin/members/${escapeHtml(m.id)}/extend"><button class="btn btn-sm btn-outline-secondary">${escapeHtml(t('admin.extend'))}</button></form>
+         <form method="post" action="/o/${escapeHtml(org.slug)}/admin/members/${escapeHtml(m.id)}/revoke" data-confirm="${escapeHtml(t('admin.revokeConfirm', { name: m.name }))}"><button class="btn btn-sm btn-outline-danger">${escapeHtml(t('admin.revoke'))}</button></form></div>`
+      : m.status === 'active' && m.id !== req.user.id
       ? `<form method="post" action="/o/${escapeHtml(org.slug)}/admin/members/${escapeHtml(m.id)}/revoke" data-confirm="${escapeHtml(t('admin.revokeConfirm', { name: m.name }))}"><button class="btn btn-sm btn-outline-danger">${escapeHtml(t('admin.revoke'))}</button></form>`
       : '',
   ]);
@@ -132,7 +135,7 @@ export function policiesView({ t, req, policy, notice, error }) {
     t('admin.policies'),
     `${alerts({ notice, error })}
     <form method="post" action="/o/${escapeHtml(org.slug)}/admin/policies">
-      <input type="hidden" name="_bools" value="external_meetings_enabled,guest_otp_required,guest_lobby_required,guest_screen_share,email_notifications">
+      <input type="hidden" name="_bools" value="external_meetings_enabled,guest_otp_required,guest_lobby_required,guest_screen_share,email_notifications,collaborators_enabled">
       <section class="card mb-4"><div class="card-body">
         <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('policy.externalTitle'))}</h2>
         ${check('external_meetings_enabled')}
@@ -153,6 +156,25 @@ export function policiesView({ t, req, policy, notice, error }) {
             <textarea class="form-control" id="p-allow" name="domain_allowlist" rows="2" placeholder="partener.ro, client.com">${escapeHtml(policy.domain_allowlist.join(', '))}</textarea></div>
           <div class="col-md-6"><label class="form-label small" for="p-deny">${escapeHtml(t('policy.domain_denylist'))}</label>
             <textarea class="form-control" id="p-deny" name="domain_denylist" rows="2">${escapeHtml(policy.domain_denylist.join(', '))}</textarea></div>
+        </div>
+      </div></section>
+      <section class="card mb-4"><div class="card-body">
+        <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('policy.collaboratorsTitle'))}</h2>
+        <p class="small text-body-secondary">${escapeHtml(t('policy.collaboratorsHelp'))}</p>
+        ${check('collaborators_enabled')}
+        <div class="row g-3 my-1">
+          <div class="col-sm-6 col-lg-4"><label class="form-label small" for="p-croles">${escapeHtml(t('policy.collaborator_invite_roles'))}</label>
+            <select class="form-select" id="p-croles" name="collaborator_invite_roles">
+              <option value="moderators"${policy.collaborator_invite_roles === 'moderators' ? ' selected' : ''}>${escapeHtml(t('policy.rolesModerators'))}</option>
+              <option value="admins"${policy.collaborator_invite_roles === 'admins' ? ' selected' : ''}>${escapeHtml(t('policy.rolesAdmins'))}</option>
+            </select></div>
+          ${num('collaborator_access_days', 0, 3650)}
+        </div>
+        <div class="row g-3 mt-1">
+          <div class="col-md-6"><label class="form-label small" for="p-callow">${escapeHtml(t('policy.domain_allowlist'))}</label>
+            <textarea class="form-control" id="p-callow" name="collaborator_domain_allowlist" rows="2" placeholder="partener.ro, client.com">${escapeHtml(policy.collaborator_domain_allowlist.join(', '))}</textarea></div>
+          <div class="col-md-6"><label class="form-label small" for="p-cdeny">${escapeHtml(t('policy.domain_denylist'))}</label>
+            <textarea class="form-control" id="p-cdeny" name="collaborator_domain_denylist" rows="2">${escapeHtml(policy.collaborator_domain_denylist.join(', '))}</textarea></div>
         </div>
       </div></section>
       <section class="card mb-4"><div class="card-body">

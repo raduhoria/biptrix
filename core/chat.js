@@ -21,7 +21,7 @@ const usage = (orgId, metric, n = 1, guard = '1', guardArgs = []) => [
 // createChat: conversations (DM, groups, Spaces), memberships and messages
 // (spec §7). Every read and write is scoped by organization and checked
 // against the caller's conversation membership here, server-side.
-export function createChat({ db, events, audit }) {
+export function createChat({ db, events, audit, policies }) {
   const parseMessage = (row) => (row ? JSON.parse(row.json) : null);
 
   // --------------------------------------------------------- conversations
@@ -45,6 +45,8 @@ export function createChat({ db, events, audit }) {
     'id', c.id, 'type', c.type, 'name', c.name, 'description', c.description, 'visibility', c.visibility,
     'last_seq', c.last_seq, 'last_message_at', c.last_message_at, 'created_at', c.created_at, 'created_by', c.created_by,
     'member_count', (SELECT COUNT(*) FROM conversation_members x WHERE x.conversation_id = c.id),
+    'external_count', (SELECT COUNT(*) FROM conversation_members x JOIN memberships xm ON xm.user_id = x.user_id AND xm.org_id = c.org_id
+                       WHERE x.conversation_id = c.id AND xm.role = 'external'),
     'member_ids', CASE WHEN c.type = 'space' THEN json('[]') ELSE json((SELECT json_group_array(x.user_id) FROM conversation_members x WHERE x.conversation_id = c.id)) END
   )`;
 
@@ -102,6 +104,20 @@ export function createChat({ db, events, audit }) {
     for (const id of ids) if (!allowed.has(id)) throw appError('forbidden', 'User is not reachable in this organization');
   }
 
+  // External collaborators join a Space only as the collaborator policy
+  // allows (enabled, who may add them, their domain), whichever path adds
+  // them: an invitation, the member picker, Space creation.
+  async function assertCollaboratorsAllowed(org, role, spaceRole, ids) {
+    if (!ids.length) return;
+    const externals = await db.all(
+      `SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.org_id = ? AND m.role = 'external' AND m.user_id IN (${ids.map(() => '?').join(',')})`,
+      [org.id, ...ids]
+    );
+    if (!externals.length) return;
+    const policy = await policies.get(org.id);
+    for (const { email } of externals) policies.assertCanInviteCollaborator({ policy, orgRole: role, spaceRole, email });
+  }
+
   function memberRows(conversationId, ids, at, roleFor = () => 'member') {
     return ids.map((id) => [
       'INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, last_read_seq, joined_at) VALUES (?, ?, ?, (SELECT last_seq FROM conversations WHERE id = ?), ?)',
@@ -151,6 +167,7 @@ export function createChat({ db, events, audit }) {
     if (!cleanName) throw appError('invalid', 'Name required', { field: 'name' });
     const ids = [...new Set(memberIds)].filter((id) => id !== user.id).slice(0, 500);
     await assertMembers(org, user, role, ids);
+    await assertCollaboratorsAllowed(org, role, 'moderator', ids);
     const id = newId();
     const at = nowIso();
     await db.batch([
@@ -200,6 +217,7 @@ export function createChat({ db, events, audit }) {
     if (conv.type === 'space' && conv.visibility === 'private' && !canModerate(conv, role)) throw appError('forbidden', 'Only moderators can add people');
     const clean = [...new Set(ids)].slice(0, 500);
     await assertMembers(org, user, role, clean);
+    if (conv.type === 'space') await assertCollaboratorsAllowed(org, role, conv.my_role, clean);
     await db.batch([
       ...memberRows(conv.id, clean, nowIso()),
       events.statement({ orgId: org.id, conversationId: conv.id, type: 'conversation.members', data: { id: conv.id, added: clean } }),

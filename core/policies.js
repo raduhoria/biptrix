@@ -18,6 +18,12 @@ export const DEFAULT_POLICY = {
   max_file_mb: 25,
   message_retention_days: 0, // 0 = keep
   email_notifications: true,
+  // External collaborators (people from other companies) in Spaces.
+  collaborators_enabled: true,
+  collaborator_invite_roles: 'moderators', // moderators (of the Space) | admins
+  collaborator_domain_allowlist: [],
+  collaborator_domain_denylist: [],
+  collaborator_access_days: 90, // 0 = no expiry
 };
 
 const NUMERIC = {
@@ -27,6 +33,7 @@ const NUMERIC = {
   invite_ttl_hours: [1, 24 * 30],
   max_file_mb: [1, 2048],
   message_retention_days: [0, 36_500],
+  collaborator_access_days: [0, 3650],
 };
 
 const domainList = (value) =>
@@ -43,8 +50,9 @@ export function normalizePolicy(input, base = DEFAULT_POLICY) {
       const n = Number(value);
       if (!Number.isFinite(n)) continue;
       out[key] = Math.min(NUMERIC[key][1], Math.max(NUMERIC[key][0], Math.round(n)));
-    } else if (key.startsWith('domain_')) out[key] = domainList(value);
+    } else if (key.endsWith('_allowlist') || key.endsWith('_denylist')) out[key] = domainList(value);
     else if (key === 'external_invite_roles') out[key] = value === 'admins' ? 'admins' : 'members';
+    else if (key === 'collaborator_invite_roles') out[key] = value === 'admins' ? 'admins' : 'moderators';
   }
   return out;
 }
@@ -88,5 +96,20 @@ export function createPolicies({ db, audit }) {
     if (sent.n >= policy.max_invites_per_day) throw appError('policy_denied', 'Daily invitation limit reached', { reason: 'dailyLimit' });
   }
 
-  return { get, update, assertCanInviteExternal };
+  // Inviting a collaborator into a Space (by e-mail): allowed by the policy,
+  // by the caller's role (Space moderator or org admin, per policy) and by
+  // the domain lists.
+  function assertCanInviteCollaborator({ policy, orgRole, spaceRole, email }) {
+    if (!policy.collaborators_enabled) throw appError('policy_denied', 'External collaborators disabled', { reason: 'collaboratorsDisabled' });
+    const admin = orgRole === 'owner' || orgRole === 'admin';
+    if (!admin && (policy.collaborator_invite_roles === 'admins' || spaceRole !== 'moderator')) {
+      throw appError('policy_denied', 'Not allowed to invite collaborators', { reason: policy.collaborator_invite_roles === 'admins' ? 'adminsOnly' : 'moderatorsOnly' });
+    }
+    const domain = emailDomain(email);
+    const listed = (list) => list.some((d) => domain === d || domain.endsWith(`.${d}`));
+    if (listed(policy.collaborator_domain_denylist)) throw appError('policy_denied', 'Domain denied', { reason: 'domainDenied' });
+    if (policy.collaborator_domain_allowlist.length && !listed(policy.collaborator_domain_allowlist)) throw appError('policy_denied', 'Domain not allowed', { reason: 'domainNotAllowed' });
+  }
+
+  return { get, update, assertCanInviteExternal, assertCanInviteCollaborator };
 }
