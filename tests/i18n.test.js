@@ -33,4 +33,15 @@ describe('languages', () => {
     const user = await app.services.users.byEmail('lang@x.ro');
     assert.equal(user.locale, 'es');
   });
+
+  test('the account page sets the language per user', async () => {
+    const c = client(app.base);
+    await c.login('lang@x.ro');
+    const page = await c.get('/account');
+    assert.match(page.text, /name="locale"/);
+    assert.match(page.text, /English/);
+    await c.post('/account/profile', { form: { name: 'Lang User', locale: 'ro' } });
+    assert.equal((await app.services.users.byEmail('lang@x.ro')).locale, 'ro');
+    assert.match((await c.get('/account')).text, /<html lang="ro">/);
+  });
 });

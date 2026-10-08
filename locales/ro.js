@@ -162,6 +162,8 @@ export default {
     emailCode: 'Codul primit pe e-mail',
     setPassword: 'Setează parola',
     mfaNeedsPassword: 'Setează întâi o parolă (secțiunea de mai sus), apoi activează MFA.',
+    language: 'Limbă',
+    languageHelp: 'Folosită pentru interfață pe toate dispozitivele tale și pentru e-mailurile pe care le primești.',
     sessions: 'Sesiuni active',
     thisDevice: 'Acest dispozitiv',
     signOutOthers: 'Închide celelalte sesiuni',
