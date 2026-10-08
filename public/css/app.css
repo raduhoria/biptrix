@@ -393,3 +393,11 @@
 .net-dot.fair { background: #f59e0b; }
 .net-dot.bad { background: #ef4444; }
 @media (max-width: 760px) { .tile-net { font-size: .6rem; opacity: .5; } }
+/* Full-screen button on tiles: always on a shared screen, on hover elsewhere. */
+.tile-full { position: absolute; top: .4rem; left: .45rem; z-index: 2; display: inline-flex; align-items: center; justify-content: center; width: 1.9rem; height: 1.9rem; padding: 0; border: 0; border-radius: .45rem; background: rgba(0, 0, 0, .45); color: #fff; opacity: 0; transition: opacity .15s; }
+.tile-full .ic { width: 1.05rem; height: 1.05rem; }
+.tile:hover .tile-full, .tile.screen-tile .tile-full, .tile-full:focus-visible { opacity: .85; }
+.tile-full:hover { opacity: 1; background: rgba(0, 0, 0, .7); }
+@media (hover: none) { .tile-full { opacity: .7; } }
+.tile:fullscreen { border-radius: 0; background: #000; }
+.tile:fullscreen video { object-fit: contain; }

@@ -1,5 +1,9 @@
 const PROTOCOL = 1;
 const RECHECK_MS = 10_000;
+// A participant whose socket drops without leaving (network blip, server
+// restart on the other side of a deploy) stays in the room this long, so the
+// others keep their media to them and the client can resume in place.
+const GRACE_MS = 20_000;
 
 // createRooms: meeting signaling over /ws/meeting?id=<meetingId> (spec §8).
 // Members authenticate with their session (and must belong to the meeting's
@@ -91,7 +95,9 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
     r.backTimer.unref?.();
   }
 
-  const peerInfo = (ws) => ({ id: ws.participant.id, name: ws.participant.display_name, role: ws.participant.role, guest: !ws.participant.user_id, media: ws.media, tracks: ws.sfu?.published || {} });
+  // `page`: one id per loaded meeting page, so a peer can tell a resumed
+  // connection (keep the media path) from a reloaded page (rebuild it).
+  const peerInfo = (ws) => ({ id: ws.participant.id, page: ws.page || '', name: ws.participant.display_name, role: ws.participant.role, guest: !ws.participant.user_id, media: ws.media, tracks: ws.sfu?.published || {} });
   // One Cloudflare session per participant connection, created on first use.
   async function sfuOf(ws) {
     ws.sfu ||= { sessionId: await media.sfu.newSession(), pending: {}, published: {}, screens: 0 };
@@ -163,6 +169,7 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
         : await meetings.joinAsMember(meeting, ws.ctx.user);
     ws.participant = participant;
     ws.media = { audio: !!data.audio, video: !!data.video, screen: false };
+    ws.page = typeof data.page === 'string' ? data.page.slice(0, 40) : '';
     if (participant.state === 'lobby') {
       r.lobby.set(participant.id, ws);
       send(ws, 'lobby', { meeting: { id: meeting.id, title: meeting.title } });
@@ -180,9 +187,23 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
     const iceServers = await media.iceServersFor(participant.id);
     if (ws.readyState !== ws.OPEN) return;
     const capacity = r.mode === 'mesh' ? Math.min(media.meshMax, policy.max_participants || media.meshMax) : policy.max_participants || 25;
-    // Re-joining from a second tab replaces the first.
+    // The same participant again: a dropped connection coming back within the
+    // grace period takes its place (and its SFU session) without anyone
+    // noticing; a second open tab replaces the first.
     const previous = r.peers.get(participant.id);
-    if (previous && previous !== ws) closeWith(previous, 'replaced');
+    let resumed = false;
+    if (previous && previous !== ws && previous.ghost) {
+      clearTimeout(previous.ghostTimer);
+      previous.ghost = false;
+      resumed = true;
+      ws.joinedAt = previous.joinedAt;
+      if (data.resume && previous.sfu) ws.sfu = previous.sfu;
+      else if (previous.sfu) {
+        // A reloaded page builds a new SFU session; the old one stops publishing.
+        const mids = Object.values(previous.sfu.pending || {}).map((t) => t.mid);
+        if (mids.length) media.sfu.close(previous.sfu.sessionId, mids).catch(() => {});
+      }
+    } else if (previous && previous !== ws) closeWith(previous, 'replaced');
     else if (r.peers.size >= capacity) return send(ws, 'error', { code: 'room_full', max: capacity });
     // One more than peer-to-peer can carry: the room moves to the SFU first.
     if (r.mode === 'auto' && !previous && r.peers.size + 1 > media.meshMax) switchTopology(r, 'sfu');
@@ -191,10 +212,14 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
       r.backTimer = null;
     }
     r.peers.set(participant.id, ws);
-    ws.joinedAt = Date.now();
+    ws.joinedAt ||= Date.now();
     send(ws, 'joined', {
       self: peerInfo(ws),
-      peers: [...r.peers.values()].filter((p) => p !== ws).map(peerInfo),
+      // Participants in their grace period are left out: they announce
+      // themselves when (if) they come back.
+      peers: [...r.peers.values()].filter((p) => p !== ws && !p.ghost).map(peerInfo),
+      resumed,
+      sfu_resumed: !!ws.sfu,
       ice_servers: iceServers,
       topology: r.topology,
       ice_policy: media.icePolicy,
@@ -206,10 +231,12 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
       // connection was in the room — the caller's tab may still be opening.)
       call: meeting.call_kind ? { kind: meeting.call_kind, ringing: meeting.ring_state === 'ringing' && meeting.ring_until > new Date().toISOString(), outcome: meeting.ring_state } : null,
     });
-    broadcast(r, 'peer.joined', peerInfo(ws), ws);
+    // `resume`: the client kept its media connections; peers that still hold
+    // one to this page keep it too.
+    broadcast(r, 'peer.joined', { ...peerInfo(ws), resume: !!data.resume }, ws);
     if (r.peers.size === 1) await meetings.markLive(meeting);
     if (canManage) lobbyUpdate(r);
-    hooks.joined(meeting, ws).catch((err) => console.error('Call hook failed:', err.message));
+    if (!resumed) hooks.joined(meeting, ws).catch((err) => console.error('Call hook failed:', err.message));
   }
 
   // ------------------------------------------------------------- room chat
@@ -450,6 +477,7 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
           if (!inRoom) return;
           return await chatSend(ws, r, data, id);
         case 'leave':
+          ws.final = true;
           return ws.close(1000, 'left');
         default:
           return;
@@ -460,9 +488,16 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
     }
   }
 
+  // A deliberate close (kick, end, replaced, revoked): no grace period; a
+  // participant already in theirs leaves now.
   function closeWith(ws, reason) {
+    ws.final = true;
     send(ws, reason, {});
     ws.close(4000, reason);
+    if (ws.ghost) {
+      clearTimeout(ws.ghostTimer);
+      leaveRoom(ws);
+    }
   }
 
   function onClose(ws) {
@@ -472,6 +507,24 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
       r.lobby.delete(ws.participant.id);
       lobbyUpdate(r);
     }
+    // Dropped without leaving: the connection died without a close frame
+    // (1006: network gone, or terminated after missed pongs). A clean close
+    // (tab closed, leave) is a departure. Keep the place for GRACE_MS.
+    if (r.peers.get(ws.participant.id) === ws && !ws.final && !closing && ws.closeCode === 1006) {
+      ws.ghost = true;
+      ws.ghostTimer = setTimeout(() => {
+        ws.ghost = false;
+        leaveRoom(ws);
+      }, GRACE_MS);
+      ws.ghostTimer.unref?.();
+      return;
+    }
+    leaveRoom(ws);
+  }
+
+  function leaveRoom(ws) {
+    const r = rooms.get(ws.ctx.meetingId);
+    if (!r || !ws.participant) return;
     // Stop publishing on the SFU, so nobody keeps receiving a removed participant.
     const mids = Object.values(ws.sfu?.pending || {}).map((t) => t.mid);
     if (mids.length) media.sfu.close(ws.sfu.sessionId, mids).catch(() => {});
@@ -496,7 +549,10 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
       ws.missedPongs = 0;
     });
     ws.on('message', (raw) => onMessage(ws, raw.toString()));
-    ws.on('close', () => onClose(ws));
+    ws.on('close', (code) => {
+      ws.closeCode = code;
+      onClose(ws);
+    });
     ws.on('error', () => {});
     send(ws, 'hello', { protocol: PROTOCOL, kind: ctx.kind });
   }
@@ -527,6 +583,7 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
   const recheck = setInterval(async () => {
     for (const r of rooms.values()) {
       for (const ws of [...r.peers.values(), ...r.lobby.values()]) {
+        if (ws.ghost) continue;
         // Dead only after two pings in a row went unanswered (~20 s): a
         // single slow pong (mobile network, busy tab) must not end a call.
         if (ws.missedPongs >= 2) {
