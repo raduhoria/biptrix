@@ -48,7 +48,7 @@ const extBadge = (id) => {
   const p = person(id);
   return p.role === 'external' ? ` <span class="ext-badge" title="${esc(t('externalTitle'))}">${esc(t('external'))} · ${esc((p.email || '').split('@')[1] || '')}</span>` : '';
 };
-const mentionHtml = (id) => `<span class="mention${id === ME ? ' mention-me' : ''}">@${esc(person(id).name)}</span>`;
+const mentionHtml = (id) => `<span class="mention${id === ME ? ' mention-me' : ''}" data-person="${esc(id)}" role="button" tabindex="0">@${esc(person(id).name)}</span>`;
 
 function convName(c) {
   if (!c) return '';
@@ -416,9 +416,9 @@ function messageHtml(m, prev, { thread = false } = {}) {
         </div>`;
   const status = pending ? `<span class="msg-status ${m._failed ? 'failed' : ''}">${m._failed ? `${icon('alert')} ${esc(t('sendFailed'))} <button class="btn btn-link btn-sm p-0" data-action="retry">${esc(t('retry'))}</button>` : icon('clock')}</span>` : '';
   return `<div class="msg${grouped ? ' grouped' : ''}${pending ? ' pending' : ''}${m.pinned_at ? ' pinned' : ''}${m.author_id === ME ? ' mine' : ''}" data-id="${esc(m.id)}" data-cid="${esc(m.client_message_id)}" data-seq="${m.seq || ''}">
-    <div class="msg-gutter">${grouped ? `<span class="msg-time-hover">${esc(time)}</span>` : avatar(m.author_id)}</div>
+    <div class="msg-gutter">${grouped ? `<span class="msg-time-hover">${esc(time)}</span>` : `<button class="person-link" data-person="${esc(m.author_id)}" aria-label="${esc(author.name)}">${avatar(m.author_id)}</button>`}</div>
     <div class="msg-main">
-      ${grouped ? '' : `<div class="msg-head"><strong>${esc(author.name)}</strong>${extBadge(m.author_id)}<span class="msg-time" title="${esc(new Date(m.created_at).toLocaleString())}">${esc(time)}</span>${m.pinned_at ? `<span class="msg-pin">${icon('pin')}</span>` : ''}</div>`}
+      ${grouped ? '' : `<div class="msg-head"><button class="person-link person-name" data-person="${esc(m.author_id)}">${esc(author.name)}</button>${extBadge(m.author_id)}<span class="msg-time" title="${esc(new Date(m.created_at).toLocaleString())}">${esc(time)}</span>${m.pinned_at ? `<span class="msg-pin">${icon('pin')}</span>` : ''}</div>`}
       ${body}${files}${reactHtml}${replies}${status}
     </div>
     ${actions}
@@ -1129,8 +1129,8 @@ async function openMembers() {
       .join('')}</ul>` : ''}
     <ul class="list-unstyled member-list">${members
       .map(
-        (m) => `<li class="d-flex align-items-center gap-2 py-1" data-user="${esc(m.id)}">${avatar(m.id, 'avatar-sm')}
-        <div class="min-w-0 flex-grow-1"><div class="text-truncate">${esc(m.name)}${m.id === ME ? ` <small class="text-body-secondary">(${esc(t('you'))})</small>` : ''}</div><small class="text-body-secondary">${esc(m.role === 'moderator' ? t('moderator') : t(`status.${state.presence[m.id] || 'offline'}`))}</small>${extBadge(m.id)}</div>
+        (m) => `<li class="d-flex align-items-center gap-2 py-1" data-user="${esc(m.id)}"><button class="person-link" data-person="${esc(m.id)}" aria-label="${esc(m.name)}">${avatar(m.id, 'avatar-sm')}</button>
+        <div class="min-w-0 flex-grow-1"><div class="text-truncate"><button class="person-link person-name" data-person="${esc(m.id)}">${esc(m.name)}</button>${m.id === ME ? ` <small class="text-body-secondary">(${esc(t('you'))})</small>` : ''}</div><small class="text-body-secondary">${esc(m.role === 'moderator' ? t('moderator') : t(`status.${state.presence[m.id] || 'offline'}`))}</small>${extBadge(m.id)}</div>
         ${m.id !== ME ? `<button class="btn btn-sm btn-icon" data-action="dm-user" title="${esc(t('message'))}">${icon('chat')}</button>` : ''}
         ${moderator && m.id !== ME ? `<div class="dropdown"><button class="btn btn-sm btn-icon" data-bs-toggle="dropdown">${icon('more')}</button><ul class="dropdown-menu dropdown-menu-end">
           <li><button class="dropdown-item" data-action="toggle-mod">${esc(t(m.role === 'moderator' ? 'removeModerator' : 'makeModerator'))}</button></li>
@@ -1236,6 +1236,81 @@ function onModalSubmit(root, handler) {
     }
   };
 }
+
+// ------------------------------------------------------------ profile card
+// A click on a name, an avatar or a mention: who it is, and a direct
+// message or a call to them in one click.
+
+function closeProfile() {
+  $('#profile-card')?.remove();
+}
+
+function showProfile(anchor, id) {
+  closeProfile();
+  const p = person(id);
+  if (!state.directory.has(id)) return;
+  const card = document.createElement('div');
+  card.className = 'profile-card shadow';
+  card.id = 'profile-card';
+  card.dataset.user = id;
+  const job = [p.title, p.department].filter(Boolean).join(' · ');
+  const others = id !== ME;
+  card.innerHTML = `<div class="d-flex align-items-center gap-3">
+      ${avatar(id, 'avatar-lg')}
+      <div class="min-w-0"><div class="fw-semibold text-truncate">${esc(p.name)}</div>${extBadge(id)}
+        ${job ? `<div class="small text-body-secondary text-truncate">${esc(job)}</div>` : ''}
+        <div class="small text-body-secondary">${esc(t(`status.${state.presence[id] || 'offline'}`))}</div></div>
+    </div>
+    ${p.email ? `<a class="d-block small text-truncate mt-2" href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : ''}
+    ${
+      others
+        ? `<div class="d-flex gap-2 mt-3">
+      <button class="btn btn-primary btn-sm flex-grow-1" data-profile="dm">${icon('chat')} ${esc(t('message'))}</button>
+      ${boot.perms.meetings ? `<button class="btn btn-outline-secondary btn-sm" data-profile="audio" title="${esc(t('startAudioCall'))}">${icon('phone')}</button>
+      <button class="btn btn-outline-secondary btn-sm" data-profile="video" title="${esc(t('startCall'))}">${icon('video')}</button>` : ''}
+    </div>`
+        : ''
+    }`;
+  document.body.append(card);
+  // Next to what was clicked, kept inside the window.
+  const r = anchor.getBoundingClientRect();
+  const w = card.offsetWidth;
+  const h = card.offsetHeight;
+  card.style.left = `${Math.max(8, Math.min(r.left, innerWidth - w - 8))}px`;
+  card.style.top = `${r.bottom + h + 8 < innerHeight ? r.bottom + 6 : Math.max(8, r.top - h - 6)}px`;
+  $('[data-profile]', card)?.focus();
+}
+
+async function profileAction(kind, id) {
+  closeProfile();
+  // A call tab must be opened inside the click, before any request.
+  const w = kind === 'dm' ? null : openCallTab();
+  try {
+    const { conversation } = await api(`${API}/dms`, { method: 'POST', body: { user_id: id } });
+    await adopt(conversation);
+    if (!w) return;
+    const { meeting } = await api(`${API}/meetings`, { method: 'POST', body: { conversation_id: conversation.id, notify_members: false, call: kind } });
+    w.location = `/o/${ORG.slug}/meet/${meeting.id}?call=${kind}`;
+  } catch (err) {
+    w?.close();
+    toast(errorText(err), 'danger');
+  }
+}
+
+document.addEventListener('click', (e) => {
+  const card = $('#profile-card');
+  const btn = e.target.closest('[data-profile]');
+  if (btn && card) return profileAction(btn.dataset.profile, card.dataset.user);
+  if (card && !card.contains(e.target) && !e.target.closest('[data-person]')) closeProfile();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeProfile();
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('span[data-person]')) {
+    e.preventDefault();
+    showProfile(e.target, e.target.dataset.person);
+  }
+});
+document.addEventListener('scroll', closeProfile, true);
 
 async function adopt(conversation) {
   state.conversations.set(conversation.id, { ...conversation, unread: 0, mentions: 0 });
@@ -1504,8 +1579,9 @@ async function runSearch(params) {
 // -------------------------------------------------------------- dom events
 
 document.addEventListener('click', async (e) => {
-  const el = e.target.closest('[data-action], [data-conv], [data-react], [data-view], [data-presence], [data-mention], [data-unstage], [data-copy], [data-manage]');
+  const el = e.target.closest('[data-person], [data-action], [data-conv], [data-react], [data-view], [data-presence], [data-mention], [data-unstage], [data-copy], [data-manage]');
   if (!el) return;
+  if (el.dataset.person) return showProfile(el, el.dataset.person);
   if (el.dataset.conv && el.tagName === 'A') {
     if (e.ctrlKey || e.metaKey) return;
     e.preventDefault();
