@@ -263,3 +263,13 @@ export const mentionEmail = ({ t, org, author, conversation, preview, url }) =>
     ],
     action: { label: t('email.mentionButton'), url },
   });
+
+export const missedCallEmail = ({ t, org, caller, kind, url }) =>
+  frame({
+    t,
+    preheader: t('email.missedCallTitle', { caller }),
+    eyebrow: t('email.eyebrow.message'),
+    title: t('email.missedCallTitle', { caller }),
+    intro: escapeHtml(t('email.missedCallLead', { caller, org, kind: t(kind === 'audio' ? 'email.callAudio' : 'email.callVideo') })),
+    action: { label: t('email.missedCallButton'), url },
+  });

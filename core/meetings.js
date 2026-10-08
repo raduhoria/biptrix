@@ -351,6 +351,29 @@ export function createMeetings({ db, policies, audit, appSecret }) {
 
   const participants = (meetingId) => db.all('SELECT * FROM meeting_participants WHERE meeting_id = ? ORDER BY created_at', [meetingId]);
 
+  // ------------------------------------------------------------ room chat
+  // Meetings without a conversation keep their in-call chat here. Sending
+  // is idempotent per participant and client id (a resend after a
+  // reconnect stores nothing new).
+  const CHAT_MAX = 2000;
+  const chatRow = (r) => ({ id: r.id, author_id: r.user_id, participant_id: r.participant_id, name: r.display_name, body: r.body, client_id: r.client_id, created_at: r.created_at });
+
+  async function addChatMessage(meeting, participant, clientId, body) {
+    const text = String(body || '').replace(/\r\n/g, '\n').trim();
+    if (!text) throw appError('invalid', 'Empty message');
+    if (text.length > CHAT_MAX) throw appError('invalid', 'Message too long', { max: CHAT_MAX });
+    const cid = String(clientId || '');
+    if (!/^[A-Za-z0-9_-]{8,64}$/.test(cid)) throw appError('invalid', 'client_id required');
+    await db.run(
+      `INSERT OR IGNORE INTO meeting_messages (id, meeting_id, org_id, participant_id, user_id, display_name, client_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [newId(), meeting.id, meeting.org_id, participant.id, participant.user_id || null, participant.display_name, cid, text, nowIso()]
+    );
+    return chatRow(await db.get('SELECT * FROM meeting_messages WHERE meeting_id = ? AND participant_id = ? AND client_id = ?', [meeting.id, participant.id, cid]));
+  }
+
+  const chatMessages = async (meetingId) =>
+    (await db.all('SELECT * FROM (SELECT * FROM meeting_messages WHERE meeting_id = ? ORDER BY created_at DESC LIMIT 200) ORDER BY created_at', [meetingId])).map(chatRow);
+
   return {
     isOpen,
     byId,
@@ -378,5 +401,7 @@ export function createMeetings({ db, policies, audit, appSecret }) {
     listForUser,
     invitations,
     participants,
+    addChatMessage,
+    chatMessages,
   };
 }

@@ -118,7 +118,8 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
           <div class="small text-body-secondary text-truncate" id="conv-sub"></div>
         </div>
         <div class="conv-actions">
-          <button class="btn btn-icon" data-action="call" title="${e('client.startCall')}">${icon('video')}</button>
+          <button class="btn btn-icon" data-action="call" data-kind="audio" title="${e('client.startAudioCall')}">${icon('phone')}</button>
+          <button class="btn btn-icon" data-action="call" data-kind="video" title="${e('client.startCall')}">${icon('video')}</button>
           <button class="btn btn-icon" data-action="pinned" title="${e('client.pinned')}">${icon('pin')}</button>
           <button class="btn btn-icon" data-action="members" title="${e('client.members')}">${icon('users')}</button>
           <div class="dropdown">

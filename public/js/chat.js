@@ -200,6 +200,10 @@ function handle(msg) {
     case 'presence':
       state.presence[d.user_id] = d.status;
       return renderPresence(d.user_id);
+    case 'call.ring':
+      return onRing(d);
+    case 'call.stop':
+      return stopRinging(d.meeting_id);
     default:
   }
 }
@@ -261,7 +265,8 @@ function renderSidebar() {
   const list = [...state.conversations.values()].sort((a, b) => (b.last_message_at || b.created_at).localeCompare(a.last_message_at || a.created_at));
   const item = (c) => {
     const unread = c.unread > 0 && c.id !== state.current;
-    const preview = c.last_message ? (c.last_message.kind === 'meeting' ? `📹 ${c.last_message.body}` : c.last_message.body.replace(/<@([A-Za-z0-9_-]+)>/g, (m, id) => `@${person(id).name}`)) : '';
+    const lm = c.last_message;
+    const preview = !lm ? '' : lm.kind === 'meeting' ? `📹 ${lm.body}` : lm.kind === 'call_missed' ? `📞 ${t(lm.author_id === ME ? 'callNoAnswer' : 'callMissed')}` : lm.body.replace(/<@([A-Za-z0-9_-]+)>/g, (m, id) => `@${person(id).name}`);
     return `<li><a class="conv-item${c.id === state.current ? ' active' : ''}${unread ? ' unread' : ''}" href="/o/${esc(ORG.slug)}/c/${esc(c.id)}" data-conv="${esc(c.id)}">
       ${convIcon(c)}
       <span class="conv-text"><span class="conv-name">${esc(convName(c))}</span>${preview ? `<span class="conv-preview">${esc(preview.slice(0, 80))}</span>` : ''}</span>
@@ -374,7 +379,7 @@ function renderHeader() {
     `<li><button class="dropdown-item" data-action="search-here">${icon('search')} ${esc(t('searchHere'))}</button></li>`,
     c.type !== 'dm' ? `<li><hr class="dropdown-divider"></li><li><button class="dropdown-item text-danger" data-action="leave">${icon('door')} ${esc(t('leave'))}</button></li>` : '',
   ].join('');
-  $('[data-action="call"]').hidden = !boot.perms.meetings;
+  for (const btn of $$('[data-action="call"]')) btn.hidden = !boot.perms.meetings;
 }
 
 const SAME_AUTHOR_MS = 5 * 60_000;
@@ -387,6 +392,7 @@ function messageHtml(m, prev, { thread = false } = {}) {
   let body;
   if (m.deleted_at) body = `<div class="msg-deleted">${esc(t('messageDeleted'))}</div>`;
   else if (m.kind === 'meeting') body = meetingCard(m);
+  else if (m.kind === 'call_missed') body = missedCallHtml(m);
   else body = `<div class="msg-body">${renderMarkdown(m.body, { mention: mentionHtml })}${m.edited_at ? ` <span class="msg-edited">(${esc(t('edited'))})</span>` : ''}</div>`;
   const files = !m.deleted_at && m.attachments?.length ? `<div class="msg-files">${m.attachments.map(fileHtml).join('')}</div>` : '';
   const reactions = groupReactions(m.reactions || []);
@@ -418,15 +424,113 @@ function messageHtml(m, prev, { thread = false } = {}) {
 
 function meetingCard(m) {
   const meta = m.meta || {};
+  const call = meta.call ? `?call=${encodeURIComponent(meta.call)}` : '';
   return `<div class="meeting-card card">
     <div class="card-body d-flex align-items-center gap-3">
-      <span class="meeting-ic">${icon('video')}</span>
+      <span class="meeting-ic">${icon(meta.call === 'audio' ? 'phone' : 'video')}</span>
       <div class="flex-grow-1 min-w-0"><div class="fw-semibold text-truncate">${esc(meta.title || m.body)}</div>
-        <div class="small text-body-secondary">${esc(t('meetingStarted', { name: person(m.author_id).name }))}</div></div>
-      <a class="btn btn-success btn-sm" href="/o/${esc(ORG.slug)}/meet/${esc(meta.meeting_id)}" target="_blank" rel="noopener">${esc(t('joinCall'))}</a>
+        <div class="small text-body-secondary">${esc(t(meta.call === 'audio' ? 'audioCallStarted' : 'meetingStarted', { name: person(m.author_id).name }))}</div></div>
+      <a class="btn btn-success btn-sm" href="/o/${esc(ORG.slug)}/meet/${esc(meta.meeting_id)}${call}" target="_blank" rel="noopener">${esc(t('joinCall'))}</a>
     </div>
   </div>`;
 }
+
+function missedCallHtml(m) {
+  const kind = m.meta?.kind === 'audio' ? 'audio' : 'video';
+  return `<div class="msg-call">${icon('phone-off')} ${esc(t(m.author_id === ME ? 'callNoAnswer' : 'callMissed'))}
+    <button class="btn btn-sm btn-link p-0" data-action="call" data-kind="${kind}">${esc(t('callBack'))}</button></div>`;
+}
+
+// ------------------------------------------------------------ incoming call
+// `call.ring` (a user-scoped durable event) opens the incoming-call screen
+// in every tab, with a ring tone, until the caller's deadline, an answer
+// here or on another device (`call.stop`), or a decline.
+
+const ringing = { call: null, timer: null, audio: null, notification: null };
+
+function onRing(d) {
+  const left = Date.parse(d.ring_until) - Date.now();
+  if (left <= 0 || ringing.call?.meeting_id === d.meeting_id) return;
+  stopRinging();
+  ringing.call = d;
+  const name = person(d.from).name || d.from_name;
+  const box = document.createElement('div');
+  box.className = 'incoming-call';
+  box.id = 'incoming-call';
+  box.innerHTML = `<div class="incoming-card" role="dialog" aria-live="assertive">
+    <span class="avatar" style="--h:${hue(d.from)}">${esc(initials(name))}</span>
+    <div class="fs-5 fw-semibold text-truncate">${esc(name)}</div>
+    <div class="small opacity-75">${esc(t(d.kind === 'audio' ? 'incomingAudio' : 'incomingVideo'))}</div>
+    <div class="incoming-actions">
+      <div><button class="btn btn-danger" data-ring="decline" aria-label="${esc(t('callDecline'))}">${icon('phone-off')}</button><small>${esc(t('callDecline'))}</small></div>
+      <div><button class="btn btn-success" data-ring="accept" aria-label="${esc(t('callAccept'))}">${icon(d.kind === 'audio' ? 'phone' : 'video')}</button><small>${esc(t('callAccept'))}</small></div>
+    </div></div>`;
+  document.body.append(box);
+  ringing.timer = setTimeout(stopRinging, left);
+  ringing.audio = ringTone();
+  navigator.vibrate?.([400, 200, 400]);
+  if ('Notification' in window && Notification.permission === 'granted' && !isVisible()) {
+    ringing.notification = new Notification(t('callIncoming', { name }), { body: t(d.kind === 'audio' ? 'incomingAudio' : 'incomingVideo'), tag: `call-${d.meeting_id}`, icon: '/favicon.svg', requireInteraction: true });
+    ringing.notification.onclick = () => window.focus();
+  }
+}
+
+function stopRinging(meetingId = null) {
+  if (!ringing.call || (meetingId && ringing.call.meeting_id !== meetingId)) return;
+  clearTimeout(ringing.timer);
+  ringing.audio?.stop();
+  ringing.notification?.close();
+  $('#incoming-call')?.remove();
+  Object.assign(ringing, { call: null, timer: null, audio: null, notification: null });
+}
+
+// A two-tone ring made with WebAudio (no sound file): 1 s on, 2 s off.
+function ringTone() {
+  try {
+    const ctx = new AudioContext();
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    gain.connect(ctx.destination);
+    for (const f of [440, 480]) {
+      const osc = ctx.createOscillator();
+      osc.frequency.value = f;
+      osc.connect(gain);
+      osc.start();
+    }
+    const beat = () => {
+      const now = ctx.currentTime;
+      gain.gain.setValueAtTime(0.08, now);
+      gain.gain.setValueAtTime(0, now + 1);
+    };
+    beat();
+    const loop = setInterval(beat, 3000);
+    return { stop: () => (clearInterval(loop), ctx.close().catch(() => {})) };
+  } catch {
+    return null;
+  }
+}
+
+// The meeting tab is opened right away (still inside the click, so it is
+// not blocked as a pop-up) and pointed at the room once the server answered.
+function openCallTab() {
+  const w = window.open('about:blank', '_blank');
+  if (w) w.opener = null;
+  return w;
+}
+
+async function answerCall(answer) {
+  const d = ringing.call;
+  if (!d) return;
+  const w = answer === 'accept' ? openCallTab() : null;
+  stopRinging();
+  api(`${API}/meetings/${d.meeting_id}/ring`, { method: 'POST', body: { answer } }).catch(() => {});
+  if (w) w.location = `/o/${ORG.slug}/meet/${d.meeting_id}?call=${d.kind}`;
+}
+
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-ring]');
+  if (btn) answerCall(btn.dataset.ring);
+});
 
 function fileHtml(f) {
   const url = `${API}/files/${encodeURIComponent(f.id)}`;
@@ -580,7 +684,9 @@ function onMessage(m, created) {
       c.unread = (c.unread || 0) + 1;
       const mentioned = m.body.includes(`<@${ME}>`);
       if (mentioned) c.mentions = (c.mentions || 0) + 1;
-      if (!c.muted && (mentioned || c.type === 'dm' || m.kind === 'meeting')) notify(c, m);
+      // (A call that rings has its own screen, see onRing.)
+      const rings = m.kind === 'meeting' && m.meta?.call && c.type !== 'space';
+      if (!c.muted && !rings && (mentioned || c.type === 'dm' || m.kind === 'meeting')) notify(c, m);
     }
   }
   renderSidebar();
@@ -1445,10 +1551,15 @@ document.addEventListener('click', async (e) => {
       return state.current ? openConversation(state.current) : showEmpty();
     case 'call': {
       if (!c) return;
+      const kind = el.dataset.kind === 'audio' ? 'audio' : 'video';
+      const w = openCallTab();
       try {
-        const { meeting } = await api(`${API}/meetings`, { method: 'POST', body: { conversation_id: c.id, notify_members: false } });
-        window.open(`/o/${ORG.slug}/meet/${meeting.id}`, '_blank', 'noopener');
+        const { meeting } = await api(`${API}/meetings`, { method: 'POST', body: { conversation_id: c.id, notify_members: false, call: kind } });
+        const url = `/o/${ORG.slug}/meet/${meeting.id}?call=${kind}`;
+        if (w) w.location = url;
+        else window.open(url, '_blank', 'noopener');
       } catch (err) {
+        w?.close();
         toast(errorText(err), 'danger');
       }
       return;

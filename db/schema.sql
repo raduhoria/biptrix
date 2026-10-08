@@ -285,6 +285,24 @@ CREATE TABLE IF NOT EXISTS meetings (
 CREATE INDEX IF NOT EXISTS idx_meetings_org ON meetings(org_id, state, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_meetings_conversation ON meetings(conversation_id);
 
+-- In-call chat of meetings not linked to a conversation (a call started
+-- from a conversation writes into that conversation instead). Visible to the
+-- participants admitted to the meeting; subject to message retention.
+CREATE TABLE IF NOT EXISTS meeting_messages (
+  id TEXT PRIMARY KEY,
+  meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  participant_id TEXT NOT NULL,
+  user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  display_name TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_messages_meeting ON meeting_messages(meeting_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_messages_client ON meeting_messages(meeting_id, participant_id, client_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_messages_org_time ON meeting_messages(org_id, created_at);
+
 -- Internal invitees (user_id) and external invitees (email + hashed token).
 CREATE TABLE IF NOT EXISTS meeting_invitations (
   id TEXT PRIMARY KEY,
