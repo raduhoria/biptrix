@@ -27,6 +27,9 @@ export const DEFAULT_POLICY = {
   collaborator_invite_roles: 'moderators', // moderators (of the Space) | admins
   collaborator_domain_allowlist: [],
   collaborator_domain_denylist: [],
+  // The organization's own e-mail domains: someone invited into a Space
+  // with such an address joins as a member, not as an external collaborator.
+  company_domains: [],
   collaborator_access_days: 90, // 0 = no expiry
 };
 
@@ -54,7 +57,7 @@ export function normalizePolicy(input, base = DEFAULT_POLICY) {
       const n = Number(value);
       if (!Number.isFinite(n)) continue;
       out[key] = Math.min(NUMERIC[key][1], Math.max(NUMERIC[key][0], Math.round(n)));
-    } else if (key.endsWith('_allowlist') || key.endsWith('_denylist')) out[key] = domainList(value);
+    } else if (key.endsWith('_allowlist') || key.endsWith('_denylist') || key === 'company_domains') out[key] = domainList(value);
     else if (key === 'external_invite_roles') out[key] = value === 'admins' ? 'admins' : 'members';
     else if (key === 'collaborator_invite_roles') out[key] = value === 'admins' ? 'admins' : 'moderators';
   }
@@ -115,5 +118,20 @@ export function createPolicies({ db, audit }) {
     if (policy.collaborator_domain_allowlist.length && !listed(policy.collaborator_domain_allowlist)) throw appError('policy_denied', 'Domain not allowed', { reason: 'domainNotAllowed' });
   }
 
-  return { get, update, assertCanInviteExternal, assertCanInviteCollaborator };
+  // A colleague (company domain) invited into a Space by e-mail: the same
+  // "who may invite" rule as for collaborators; the collaborator switch and
+  // domain lists do not apply to the organization's own people.
+  function assertCanInviteColleague({ policy, orgRole, spaceRole }) {
+    const admin = orgRole === 'owner' || orgRole === 'admin';
+    if (!admin && (policy.collaborator_invite_roles === 'admins' || spaceRole !== 'moderator')) {
+      throw appError('policy_denied', 'Not allowed to invite', { reason: policy.collaborator_invite_roles === 'admins' ? 'adminsOnly' : 'moderatorsOnly' });
+    }
+  }
+
+  const isCompanyEmail = (policy, email) => {
+    const domain = emailDomain(email);
+    return policy.company_domains.some((d) => domain === d || domain.endsWith(`.${d}`));
+  };
+
+  return { get, update, assertCanInviteExternal, assertCanInviteCollaborator, assertCanInviteColleague, isCompanyEmail };
 }

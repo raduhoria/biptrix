@@ -53,7 +53,7 @@ export function registerAdminRoutes(router, { auth, orgs, chat, policies, audit,
   // ---------------------------------------------------------------- members
   router.get('/o/:org/admin/members', ...gate('members.manage'), async (req, res) => {
     const members = await orgs.members(req.org.id, { search: String(req.query.q || '').slice(0, 80), includeRevoked: !!req.query.all });
-    res.send(membersView({ t: req.t, req, members, invites: await orgs.pendingInvites(req.org.id), ...flash(req) }));
+    res.send(membersView({ t: req.t, req, members, invites: await orgs.pendingInvites(req.org.id), companyDomains: (await policies.get(req.org.id)).company_domains, ...flash(req) }));
   });
 
   router.post('/o/:org/admin/invites', ...gate('members.manage'), async (req, res) => {

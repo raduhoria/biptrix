@@ -130,15 +130,19 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
       await chat.addMembers(req.org, req.user, role(req), space.id, [existing.id], req.ip);
       return res.json({ status: 'added' });
     }
-    policies.assertCanInviteCollaborator({ policy, orgRole: role(req), spaceRole: space.my_role, email });
+    // The company's own domains join as members (no expiry, full access);
+    // anyone else as an external collaborator of this Space.
+    const colleague = policies.isCompanyEmail(policy, email);
+    if (colleague) policies.assertCanInviteColleague({ policy, orgRole: role(req), spaceRole: space.my_role });
+    else policies.assertCanInviteCollaborator({ policy, orgRole: role(req), spaceRole: space.my_role, email });
     const today = (await db.get('SELECT COUNT(*) AS n FROM org_invites WHERE invited_by = ? AND created_at >= ?', [req.user.id, new Date(Date.now() - 86400_000).toISOString()])).n;
     if (today >= INVITES_PER_DAY) throw appError('rate_limited', 'Too many invitations today', { reason: 'dailyLimit' });
-    const inv = await orgs.invite(req.org, { email, role: 'external', conversationId: space.id, accessDays: policy.collaborator_access_days }, req.actor, req.ip);
+    const inv = await orgs.invite(req.org, { email, role: colleague ? 'member' : 'external', conversationId: space.id, accessDays: colleague ? null : policy.collaborator_access_days }, req.actor, req.ip);
     mailer.queue({
       to: email,
-      ...spaceInviteEmail({ t: req.t, org: req.org.name, inviter: req.user.name, space: space.name, url: `${config.appUrl}/invite/${inv.token}`, days: policy.collaborator_access_days }),
+      ...spaceInviteEmail({ t: req.t, org: req.org.name, inviter: req.user.name, space: space.name, url: `${config.appUrl}/invite/${inv.token}`, days: policy.collaborator_access_days, colleague }),
     });
-    res.json({ status: 'invited' });
+    res.json({ status: 'invited', role: colleague ? 'member' : 'external' });
   });
 
   // Pending invitations of a Space, for those who can manage it.

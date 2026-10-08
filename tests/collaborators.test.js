@@ -120,4 +120,31 @@ describe('external collaborators', () => {
     assert.ok(await app.db.get("SELECT 1 FROM audit_events WHERE action = 'member.expire' AND resource_id = ?", [ionId]));
     void ana;
   });
+  test('company domains: invited into a Space as a member, not an external collaborator', async () => {
+    const owner = await app.services.users.byEmail('owner@altbet.ro');
+    await app.services.policies.update(org.id, { company_domains: 'altbet.ro' }, owner, '');
+    const res = await anaClient.post(`${API()}/conversations/${space.id}/invite`, { json: { email: 'nou@altbet.ro' } });
+    assert.equal(res.data.status, 'invited');
+    assert.equal(res.data.role, 'member');
+    const mail = lastMailTo(app, 'nou@altbet.ro');
+    assert.doesNotMatch(mail.text, /90/, 'no access limit in the e-mail');
+    const nou = client(app.base);
+    assert.equal((await nou.post(`/invite/${inviteToken(mail)}`, { form: { name: 'Nou' } })).status, 303);
+    const m = await app.db.get("SELECT role, access_expires_at FROM memberships WHERE org_id = ? AND user_id = (SELECT id FROM users WHERE email = 'nou@altbet.ro')", [org.id]);
+    assert.deepEqual({ ...m }, { role: 'member', access_expires_at: null });
+    assert.ok((await nou.get(`${API()}/bootstrap`)).data.conversations.some((c) => c.id === space.id), 'in the Space');
+    // Other domains are still external collaborators.
+    assert.equal((await anaClient.post(`${API()}/conversations/${space.id}/invite`, { json: { email: 'cineva@extern.com' } })).data.role, 'external');
+
+    // An external collaborator with a company address is flagged in the console.
+    // (The console requires MFA: the owner's session is marked as verified.)
+    const ownerClient = client(app.base);
+    await app.user(org, { email: 'gresit@altbet.ro', role: 'external' });
+    await ownerClient.login('owner@altbet.ro');
+    await app.db.run('UPDATE sessions SET mfa_ok = 1 WHERE user_id = ?', [owner.id]);
+    await app.db.run('UPDATE users SET totp_secret = ? WHERE id = ?', [app.services.secretBox.encrypt('JBSWY3DPEHPK3PXP'), owner.id]);
+    const page = await ownerClient.get(`/o/${org.slug}/admin/members`);
+    assert.equal(page.status, 200, page.text.slice(0, 200));
+    assert.match(page.text, /gresit@altbet\.ro[\s\S]{0,400}⚠/);
+  });
 });
