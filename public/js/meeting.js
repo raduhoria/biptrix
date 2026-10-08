@@ -1056,7 +1056,14 @@ function layout() {
   const cols = n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4;
   tiles.style.setProperty('--cols', cols);
   tiles.style.setProperty('--rows', Math.ceil(n / cols) || 1);
+  if (screen) {
+    // The shared screen is exactly as tall as the visible area.
+    const pad = parseFloat(getComputedStyle(tiles).paddingTop) + parseFloat(getComputedStyle(tiles).paddingBottom);
+    tiles.style.setProperty('--side', Math.max(1, n));
+    tiles.style.setProperty('--stage-h', `${tiles.clientHeight - pad}px`);
+  }
 }
+window.addEventListener('resize', () => layout());
 
 // Active speaker: a light outline on the tile of whoever is talking.
 function watchLevel(peer) {
