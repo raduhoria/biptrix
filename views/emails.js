@@ -167,18 +167,20 @@ export const orgInviteEmail = ({ t, org, inviter, url, role = '' }) =>
     outro: escapeHtml(t('email.expires7')),
   });
 
-export const spaceInviteEmail = ({ t, org, inviter, space, url, days }) =>
+// colleague: an address of the organization's own domains — joins as a
+// member, so no "only this Space" scope and no access limit.
+export const spaceInviteEmail = ({ t, org, inviter, space, url, days, colleague = false }) =>
   frame({
     t,
     preheader: t('email.spaceInviteIntro', { inviter, space, org }),
-    eyebrow: t('email.eyebrow.collab'),
+    eyebrow: t(colleague ? 'email.eyebrow.invite' : 'email.eyebrow.collab'),
     title: t('email.spaceInviteTitle', { space, org }),
-    intro: `${escapeHtml(t('email.spaceInviteIntro', { inviter, space, org }))} ${escapeHtml(t('email.spaceInviteScope'))}`,
+    intro: colleague ? escapeHtml(t('email.spaceInviteIntro', { inviter, space, org })) : `${escapeHtml(t('email.spaceInviteIntro', { inviter, space, org }))} ${escapeHtml(t('email.spaceInviteScope'))}`,
     details: [
       [t('email.labels.space'), space],
       [t('email.labels.org'), org],
       [t('email.labels.invitedBy'), inviter],
-      [t('email.labels.access'), days ? t('email.accessDays', { days }) : t('email.accessUnlimited')],
+      [t('email.labels.access'), colleague || !days ? t('email.accessUnlimited') : t('email.accessDays', { days })],
     ],
     action: { label: t('email.spaceInviteButton'), url },
     outro: escapeHtml(`${t('email.expires7')} ${t('email.noPasswordNeeded')}`),

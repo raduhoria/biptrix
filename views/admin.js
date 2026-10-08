@@ -54,7 +54,11 @@ export function overviewView({ t, req, stats, notice, error }) {
   );
 }
 
-export function membersView({ t, req, members, invites, notice, error }) {
+export function membersView({ t, req, members, invites, notice, error, companyDomains = [] }) {
+  const ownDomain = (email) => {
+    const d = String(email).split('@')[1] || '';
+    return companyDomains.some((c) => d === c || d.endsWith(`.${c}`));
+  };
   const org = req.org;
   const myRole = req.membership.role;
   const roleOptions = (current) =>
@@ -62,7 +66,9 @@ export function membersView({ t, req, members, invites, notice, error }) {
       .map((r) => `<option value="${r}"${r === current ? ' selected' : ''}>${escapeHtml(t(`roles.${r}`))}</option>`)
       .join('');
   const rows = members.map((m) => [
-    `<div class="fw-semibold">${escapeHtml(m.name)}</div><div class="small text-body-secondary">${escapeHtml(m.email)}</div>`,
+    `<div class="fw-semibold">${escapeHtml(m.name)}</div><div class="small text-body-secondary">${escapeHtml(m.email)}</div>${
+      m.status === 'active' && m.role === 'external' && ownDomain(m.email) ? `<div class="small text-warning-emphasis">${escapeHtml(t('admin.externalOwnDomain'))}</div>` : ''
+    }`,
     m.status === 'active' && m.id !== req.user.id && (m.role !== 'owner' || myRole === 'owner')
       ? `<form method="post" action="/o/${escapeHtml(org.slug)}/admin/members/${escapeHtml(m.id)}/role" class="d-flex gap-1">
            <select class="form-select form-select-sm" name="role" aria-label="${escapeHtml(t('admin.role'))}">${roleOptions(m.role)}</select>
@@ -161,6 +167,9 @@ export function policiesView({ t, req, policy, notice, error }) {
       <section class="card mb-4"><div class="card-body">
         <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('policy.collaboratorsTitle'))}</h2>
         <p class="small text-body-secondary">${escapeHtml(t('policy.collaboratorsHelp'))}</p>
+        <div class="mb-3"><label class="form-label small" for="p-company">${escapeHtml(t('policy.company_domains'))}</label>
+          <textarea class="form-control" id="p-company" name="company_domains" rows="1" placeholder="firma.ro">${escapeHtml(policy.company_domains.join(', '))}</textarea>
+          <div class="form-text">${escapeHtml(t('policy.company_domains_help'))}</div></div>
         ${check('collaborators_enabled')}
         <div class="row g-3 my-1">
           <div class="col-sm-6 col-lg-4"><label class="form-label small" for="p-croles">${escapeHtml(t('policy.collaborator_invite_roles'))}</label>
