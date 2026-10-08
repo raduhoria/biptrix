@@ -807,12 +807,13 @@ function meshCaps(others) {
   return { camera: { maxBitrate: 400_000, scaleResolutionDownBy: 2 }, screen: { maxBitrate: 1_000_000 } };
 }
 
-async function capSender(sender, cap) {
+async function capSender(sender, cap, degradation = 'balanced') {
   const params = sender.getParameters();
   if (!params.encodings?.length) return; // not negotiated yet; applied after
   const enc = params.encodings[0];
-  if (enc.maxBitrate === cap.maxBitrate && (enc.scaleResolutionDownBy || 1) === (cap.scaleResolutionDownBy || 1)) return;
+  if (enc.maxBitrate === cap.maxBitrate && (enc.scaleResolutionDownBy || 1) === (cap.scaleResolutionDownBy || 1) && params.degradationPreference === degradation) return;
   Object.assign(enc, cap);
+  params.degradationPreference = degradation;
   await sender.setParameters(params).catch(() => {});
 }
 
@@ -821,7 +822,7 @@ function capPeer(peer) {
   const caps = meshCaps(state.peers.size);
   const tr = peer.pc.getTransceivers();
   if (tr[SLOT.camera]) capSender(tr[SLOT.camera].sender, caps.camera);
-  if (tr[SLOT.screen]) capSender(tr[SLOT.screen].sender, caps.screen);
+  if (tr[SLOT.screen]) capSender(tr[SLOT.screen].sender, caps.screen, 'maintain-resolution');
 }
 
 const capAll = () => {
@@ -1024,6 +1025,19 @@ function announceMedia() {
 
 // ------------------------------------------------------------------- tiles
 
+// Full screen for one tile (button or double-click). iPhone Safari has no
+// element full screen: its own video player is used there.
+function toggleFullscreen(tile) {
+  if (!tile) return;
+  if (document.fullscreenElement) return document.exitFullscreen().catch(() => {});
+  if (tile.requestFullscreen) return tile.requestFullscreen().catch(() => {});
+  $('video', tile)?.webkitEnterFullscreen?.();
+}
+document.addEventListener('fullscreenchange', () => {
+  for (const b of $$('.tile-full')) b.innerHTML = icon(b.closest('.tile') === document.fullscreenElement ? 'minimize' : 'maximize');
+});
+$('#tiles').addEventListener('dblclick', (e) => toggleFullscreen(e.target.closest('.tile')));
+
 function tileShell(id, name, extraClass = '') {
   const el = document.createElement('div');
   el.className = `tile ${extraClass}`;
@@ -1031,7 +1045,8 @@ function tileShell(id, name, extraClass = '') {
   el.innerHTML = `<video autoplay playsinline></video>
     <div class="tile-avatar"><span class="avatar avatar-xl" style="--h:${hue(id)}">${esc(initials(name))}</span></div>
     <div class="tile-name"><span class="tile-mic"></span><span class="text-truncate">${esc(name)}</span></div>
-    <div class="tile-net" hidden></div>`;
+    <div class="tile-net" hidden></div>
+    <button class="tile-full" data-action="fullscreen" title="${esc(t('meet.fullscreen'))}" aria-label="${esc(t('meet.fullscreen'))}">${icon('maximize')}</button>`;
   $('#tiles').append(el);
   return el;
 }
@@ -1297,6 +1312,8 @@ async function toggleScreen() {
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
     state.local.screen = stream.getVideoTracks()[0];
+    // Text and code: keep the resolution, give up frame rate when bandwidth is short.
+    state.local.screen.contentHint = 'detail';
     state.local.screen.onended = stopScreen;
     pushTrack(SLOT.screen);
     if (state.sfu) sfuScreenOn();
@@ -1359,6 +1376,8 @@ root.addEventListener('click', async (e) => {
     case 'close-panel':
       $('#meet-panel').hidden = true;
       return;
+    case 'fullscreen':
+      return toggleFullscreen(btn.closest('.tile'));
     case 'toggle-layout':
       state.spotlight = !state.spotlight;
       return layout();
