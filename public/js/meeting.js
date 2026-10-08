@@ -897,10 +897,98 @@ function tileShell(id, name, extraClass = '') {
   el.dataset.peer = id;
   el.innerHTML = `<video autoplay playsinline></video>
     <div class="tile-avatar"><span class="avatar avatar-xl" style="--h:${hue(id)}">${esc(initials(name))}</span></div>
-    <div class="tile-name"><span class="tile-mic"></span><span class="text-truncate">${esc(name)}</span></div>`;
+    <div class="tile-name"><span class="tile-mic"></span><span class="text-truncate">${esc(name)}</span></div>
+    <div class="tile-net" hidden></div>`;
   $('#tiles').append(el);
   return el;
 }
+
+// ------------------------------------------------------- connection label
+// A small corner label on every tile: how that person's media arrives
+// (P2P direct, P2P through a TURN relay, or SFU), the bitrate received from
+// them and the round trip; on your own tile, what you send. From getStats
+// every 2 s; a dot colors the quality (loss and latency).
+const NET_EVERY_MS = 2000;
+const netPrev = new Map(); // key → { bytes, at, lost, recv }
+
+const fmtRate = (bps) => (bps >= 1e6 ? `${(bps / 1e6).toFixed(1)} Mbps` : `${Math.max(0, Math.round(bps / 1000))} kbps`);
+
+async function pcInfo(pc) {
+  const stats = await pc.getStats();
+  let pair = null;
+  const byId = new Map();
+  for (const r of stats.values()) {
+    byId.set(r.id, r);
+    if (r.type === 'transport' && r.selectedCandidatePairId) pair = r.selectedCandidatePairId;
+  }
+  const selected = pair ? byId.get(pair) : [...stats.values()].find((r) => r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded');
+  const local = selected && byId.get(selected.localCandidateId);
+  const remote = selected && byId.get(selected.remoteCandidateId);
+  return { stats, rtt: selected?.currentRoundTripTime, relay: local?.candidateType === 'relay' || remote?.candidateType === 'relay' };
+}
+
+function rate(key, bytes, extra = {}) {
+  const now = performance.now();
+  const prev = netPrev.get(key);
+  netPrev.set(key, { bytes, at: now, ...extra });
+  return prev && now > prev.at ? { bps: ((bytes - prev.bytes) * 8 * 1000) / (now - prev.at), prev } : null;
+}
+
+function paintNet(tile, path, text, quality, title) {
+  const el = tile && $('.tile-net', tile);
+  if (!el) return;
+  el.hidden = false;
+  el.title = title;
+  el.innerHTML = `<span class="net-dot ${quality}"></span>${esc(path)}${text ? ` · ${esc(text)}` : ''}`;
+}
+
+const qualityOf = (rtt, lossPct) => (rtt > 0.3 || lossPct > 5 ? 'bad' : rtt > 0.15 || lossPct > 1 ? 'fair' : 'good');
+
+async function updateNet() {
+  if (!state.joined || root.dataset.stage !== 'room') return;
+  const sources = [];
+  if (state.sfu?.pc) sources.push({ pc: state.sfu.pc, kind: 'sfu' });
+  for (const peer of state.peers.values()) if (peer.pc) sources.push({ pc: peer.pc, kind: 'p2p', peer });
+  let sent = 0;
+  let selfPath = state.topology === 'sfu' ? 'SFU' : 'P2P';
+  let selfRtt = 0;
+  const perPeer = new Map(); // peer id → { path, relay, bytes, lost, recv, rtt }
+  for (const src of sources) {
+    let info;
+    try {
+      info = await pcInfo(src.pc);
+    } catch {
+      continue;
+    }
+    if (src.kind === 'sfu' && info.relay) selfPath = 'SFU · TURN';
+    if (info.rtt) selfRtt = Math.max(selfRtt, info.rtt);
+    for (const r of info.stats.values()) {
+      if (r.type === 'outbound-rtp') sent += r.bytesSent || 0;
+      if (r.type !== 'inbound-rtp') continue;
+      // Which person this media belongs to: the tile showing that track.
+      const peer = [...state.peers.values()].find((p) => [...p.stream.getTracks(), ...p.screen.getTracks()].some((t) => t.id === r.trackIdentifier));
+      if (!peer) continue;
+      const entry = perPeer.get(peer.info.id) || { path: src.kind === 'sfu' ? 'SFU' : info.relay ? 'P2P · TURN' : 'P2P', bytes: 0, lost: 0, recv: 0, rtt: info.rtt || 0 };
+      entry.bytes += r.bytesReceived || 0;
+      entry.lost += Math.max(0, r.packetsLost || 0);
+      entry.recv += r.packetsReceived || 0;
+      perPeer.set(peer.info.id, entry);
+    }
+  }
+  for (const peer of state.peers.values()) {
+    const e = perPeer.get(peer.info.id);
+    if (!e) continue;
+    const r = rate(`in:${peer.info.id}`, e.bytes, { lost: e.lost, recv: e.recv });
+    const dLost = r ? e.lost - (r.prev.lost || 0) : 0;
+    const dRecv = r ? e.recv - (r.prev.recv || 0) : 0;
+    const loss = dLost + dRecv > 0 ? (100 * dLost) / (dLost + dRecv) : 0;
+    const text = [r ? fmtRate(r.bps) : '', e.rtt ? `${Math.round(e.rtt * 1000)} ms` : ''].filter(Boolean).join(' · ');
+    paintNet(peer.tile, e.path, text, qualityOf(e.rtt, loss), t(e.path === 'SFU' ? 'meet.netSfu' : e.path === 'P2P' ? 'meet.netP2p' : 'meet.netRelay'));
+  }
+  const up = rate('out', sent);
+  paintNet(localTile, selfPath, up ? `↑ ${fmtRate(up.bps)}` : '', qualityOf(selfRtt, 0), t(selfPath.startsWith('SFU') ? 'meet.netSfu' : 'meet.netP2p'));
+}
+setInterval(() => updateNet().catch(() => {}), NET_EVERY_MS);
 
 function createTile(peer) {
   peer.tile = tileShell(peer.info.id, peer.info.name + (peer.info.guest ? ` (${t('meet.guest')})` : ''), 'connecting');
