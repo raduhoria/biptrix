@@ -8,8 +8,8 @@ import { escapeHtml } from './layout.js';
 //
 // Brand and base URL are set once at startup (configureEmails): the name in
 // the header is the sender name (SMTP_FROM_NAME), so a deployment branded
-// "Altbet Talk" never shows the product's code name.
-const brand = { name: 'Biptrix', url: '' };
+// with its own sender name shows that name everywhere in the mail.
+const brand = { name: 'BipTrix', url: '' };
 
 export function configureEmails({ name, url }) {
   if (name) brand.name = name;

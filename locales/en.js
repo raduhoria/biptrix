@@ -2,7 +2,7 @@
 // to Romanian).
 export default {
   app: {
-    name: 'Biptrix',
+    name: 'BipTrix',
     footer: 'Secure messaging and meetings for teams.',
   },
   common: {

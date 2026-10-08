@@ -2,7 +2,7 @@
 // The `client` subtree is sent to the browser modules (public/js).
 export default {
   app: {
-    name: 'Biptrix',
+    name: 'BipTrix',
     footer: 'Mesagerie și meetinguri securizate pentru echipe.',
   },
   common: {

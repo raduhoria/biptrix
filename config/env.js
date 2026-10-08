@@ -45,7 +45,7 @@ export function loadConfig(env = process.env) {
       user: env.SMTP_USER || '',
       password: env.SMTP_PASSWORD || '',
       fromEmail: env.SMTP_FROM_EMAIL || '',
-      fromName: env.SMTP_FROM_NAME || 'Biptrix',
+      fromName: env.SMTP_FROM_NAME || 'BipTrix',
     },
 
     media: {
