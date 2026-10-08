@@ -304,9 +304,11 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
   // the meeting's card in its conversation stops offering "Join" — it shows
   // how the call ended (ended with its duration, missed, canceled), on every
   // client at once (message.updated).
-  async function close(meeting, actor, state, ip) {
+  // `at`: when it really ended (a call closed after its grace period ended
+  // when the last person left, not when the timer fired).
+  async function close(meeting, actor, state, ip, at = nowIso()) {
     if (!isOpen(meeting)) return;
-    await finish(meeting, state, nowIso(), audit.statement({ orgId: meeting.org_id, actor, action: state === 'canceled' ? 'meeting.cancel' : 'meeting.end', resourceType: 'meeting', resourceId: meeting.id, ip }));
+    await finish(meeting, state, at, audit.statement({ orgId: meeting.org_id, actor, action: state === 'canceled' ? 'meeting.cancel' : 'meeting.end', resourceType: 'meeting', resourceId: meeting.id, ip }));
   }
 
   async function finish(meeting, state, at, auditRow) {

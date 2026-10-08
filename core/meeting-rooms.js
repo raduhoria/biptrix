@@ -202,7 +202,9 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
       screen_share: participant.user_id ? true : !!policy.guest_screen_share,
       meeting: { id: meeting.id, title: meeting.title, host_id: meeting.host_id, expires_at: meeting.expires_at },
       chat: chatState,
-      call: meeting.call_kind ? { kind: meeting.call_kind, ringing: meeting.ring_state === 'ringing' && meeting.ring_until > new Date().toISOString() } : null,
+      // (outcome: a decline or a missed deadline that happened before this
+      // connection was in the room — the caller's tab may still be opening.)
+      call: meeting.call_kind ? { kind: meeting.call_kind, ringing: meeting.ring_state === 'ringing' && meeting.ring_until > new Date().toISOString(), outcome: meeting.ring_state } : null,
     });
     broadcast(r, 'peer.joined', peerInfo(ws), ws);
     if (r.peers.size === 1) await meetings.markLive(meeting);

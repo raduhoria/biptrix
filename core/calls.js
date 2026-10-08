@@ -1,4 +1,5 @@
 import { createTranslator } from './i18n.js';
+import { nowIso } from './util.js';
 import { missedCallEmail } from '../views/emails.js';
 
 export const RING_MS = 45_000;
@@ -52,7 +53,8 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
     if (!meeting.call_kind || user.id === meeting.host_id) return;
     await stopFor(meeting.org_id, meeting.id, [user.id]);
     if (answer === 'accept') {
-      await db.run("UPDATE meetings SET ring_state = 'answered' WHERE id = ? AND ring_state = 'ringing'", [meeting.id]);
+      // A call's duration runs from the answer, not from the first ring.
+      await db.run("UPDATE meetings SET ring_state = 'answered', started_at = ? WHERE id = ? AND ring_state = 'ringing'", [nowIso(), meeting.id]);
       return;
     }
     rooms.notifyRoom(meeting.id, 'call.declined', { name: user.name });
@@ -112,10 +114,11 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
       const current = await meetings.byId(meeting.id);
       if (!current?.call_kind) return;
       if (current.ring_state === 'ringing') return missed(current);
+      const emptiedAt = nowIso();
       const timer = setTimeout(async () => {
         try {
           const now = await meetings.byId(meeting.id);
-          if (now && !rooms.live(meeting.id)) await meetings.close(now, { label: 'system' }, 'ended', null);
+          if (now && !rooms.live(meeting.id)) await meetings.close(now, { label: 'system' }, 'ended', null, emptiedAt);
         } catch (err) {
           console.error('Call close failed:', err.message);
         }

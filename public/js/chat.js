@@ -440,11 +440,7 @@ function meetingCard(m) {
   const call = meta.call ? `?call=${encodeURIComponent(meta.call)}` : '';
   const over = meta.state === 'ended' || meta.state === 'canceled';
   const started = t(meta.call === 'audio' ? 'audioCallStarted' : 'meetingStarted', { name: person(m.author_id).name });
-  let status = started;
-  if (over) {
-    status =
-      meta.state === 'canceled' ? t('callCanceled') : meta.outcome === 'missed' ? t('callMissed') : meta.outcome === 'declined' ? t('callDeclinedShort') : meta.duration_s ? t('callEndedAfter', { duration: fmtDuration(meta.duration_s) }) : t('callEnded');
-  }
+  const status = over ? callOutcome(m, meta) : started;
   return `<div class="meeting-card card${over ? ' ended' : ''}">
     <div class="card-body d-flex align-items-center gap-3">
       <span class="meeting-ic">${icon(over ? 'phone-off' : meta.call === 'audio' ? 'phone' : 'video')}</span>
@@ -455,10 +451,25 @@ function meetingCard(m) {
   </div>`;
 }
 
+// Seen by the caller (the author): "no answer", nothing to click. Seen by
+// the people who were called: "missed call from X" and "call back".
 function missedCallHtml(m) {
   const kind = m.meta?.kind === 'audio' ? 'audio' : 'video';
-  return `<div class="msg-call">${icon('phone-off')} ${esc(t(m.author_id === ME ? 'callNoAnswer' : 'callMissed'))}
+  if (m.author_id === ME) {
+    const c = state.conversations.get(m.conversation_id);
+    return `<div class="msg-call">${icon('phone-off')} ${esc(t(c?.type === 'dm' ? 'callNoAnswer' : 'callNobodyAnswered'))}</div>`;
+  }
+  return `<div class="msg-call">${icon('phone-off')} ${esc(t('callMissedFrom', { name: person(m.author_id).name }))}
     <button class="btn btn-sm btn-link p-0" data-action="call" data-kind="${kind}">${esc(t('callBack'))}</button></div>`;
+}
+
+// How an ended call reads, from where the viewer stood (caller or called).
+function callOutcome(m, meta) {
+  const caller = m.author_id === ME;
+  if (meta.state === 'canceled') return t('callCanceled');
+  if (meta.outcome === 'missed') return t(caller ? 'callNoAnswer' : 'callMissed');
+  if (meta.outcome === 'declined') return t(caller ? 'callDeclinedShort' : 'callYouDeclined');
+  return meta.duration_s ? t('callEndedAfter', { duration: fmtDuration(meta.duration_s) }) : t('callEnded');
 }
 
 // ------------------------------------------------------------ incoming call

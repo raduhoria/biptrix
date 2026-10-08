@@ -338,6 +338,8 @@ function onJoined(d) {
   // The caller, alone in the room while the others' phones ring.
   state.ringing = !!d.call?.ringing && !state.peers.size && state.self.role === 'host';
   if (state.ringing) callBanner(t('meet.calling'), true);
+  else if (!state.peers.size && state.self.role === 'host' && d.call?.outcome === 'declined') callBanner(t('meet.callDeclinedEarly'));
+  else if (!state.peers.size && state.self.role === 'host' && d.call?.outcome === 'missed') callBanner(t('meet.callMissed'));
 }
 
 // ------------------------------------------------------------------- calls
