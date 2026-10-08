@@ -179,8 +179,13 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
     send(ws, 'hello', { protocol: PROTOCOL, node: config.nodeId, cursor: events.cursor() });
   }
 
+  // Chat sockets only: meeting sockets share this WebSocket server but have
+  // their own liveness check (core/meeting-rooms.js). Two loops flipping the
+  // same flag killed healthy meeting sockets whenever one ran between the
+  // other's ping and its pong.
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
+      if (!ws.ctx?.org) continue;
       if (!ws.alive) {
         ws.terminate();
         continue;
