@@ -1,0 +1,10 @@
+# Daily database backup (see /usr/local/sbin/biptrix-backup).
+[Unit]
+Description=Biptrix database backup
+ConditionPathExists=/var/lib/biptrix/biptrix.db
+
+[Service]
+Type=oneshot
+User=biptrix
+Group=biptrix
+ExecStart=/usr/local/sbin/biptrix-backup

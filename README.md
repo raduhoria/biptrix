@@ -22,7 +22,7 @@ designed to be sold as SaaS or self-hosted.
 npm install
 cp .env.example .env      # optional; every value has a default
 npm run dev               # http://localhost:3000 → /setup on first run
-npm test                  # 20 tests: isolation, idempotency, catch-up, guests, MFA…
+npm test                  # 38 tests: isolation, idempotency, catch-up, guests, MFA…
 ```
 
 The first run asks you to create the platform operator account and the first
@@ -42,6 +42,8 @@ to the console.
 | Search | FTS5 that ignores diacritics. Scoped to the caller's conversations. Filters: conversation, author, date. Also searches file names. |
 | Meetings | Instant or scheduled meetings, and calls from a DM or Space (posted as a card in the conversation). WebRTC mesh with lobby, host/co-host, admit, remove, end for all, screen share, device selection, active speaker. |
 | External guests | A personal link (only the token hash is stored) leads to an e-mailed OTP (rate limited, attempts counted), then a guest session bound to the meeting, then the lobby. Revoking or ending the meeting closes the sessions and the sockets. |
+| External collaborators | Space moderators (or admins only, per policy) invite people from other companies by e-mail straight into a Space. They get the `external` role with access that expires after N days (90 by default). They see only the conversations shared with them: no directory, no browsing, cannot create Spaces. Each person shows an "external · domain" badge, and a Space that contains them shows a banner. Access can be extended or revoked from the admin console. |
+| Passwordless sign-in | A 6-digit code sent by e-mail: stored as an HMAC, valid 10 minutes, single use, rate limited. MFA, when enabled, still follows. Accounts created from an invitation can have no password at all. |
 | Policies | Per organization and versioned: external invitations on/off, who may invite, allowed/blocked domains, OTP, lobby, guest screen share, daily limits, duration, participants, file size, retention, e-mail notifications. |
 | Administration | Organization console: members and invitations, roles, revocation (closes sockets), Spaces (archive), policies, audit. Operator console: tenants (create, suspend, limits), accounts (disable), health, platform audit. The operator has no access to tenant content. |
 | Operations | `/healthz`, `/readyz`. Usage counters per tenant and month. Hourly maintenance: expired sessions, the 7-day event window, orphan uploads, retention, WAL checkpoint. |
@@ -116,3 +118,39 @@ parameter (consistent hash).
 - F5: cross-node presence and typing, rqlite load tests, billing.
 - P1/P2: SSO (OIDC/SAML), external calendar, recordings, native apps.
 - Backup: `db.backup()` (`VACUUM INTO`) exists; the orchestration script and restore test are not written yet.
+
+## Production: talk.altbetexchange.com
+
+```
+Cloudflare (proxied CNAME talk -> balancer.altbetexchange.com)
+  -> lb1/lb2 HAProxy, TLS, backend be_biptrix
+  -> ai-wizz (10.50.1.126) nginx :443, vhost talk.altbetexchange.com (WebSocket upgrade)
+  -> 127.0.0.1:3400, biptrix.service
+```
+
+- **Host:** `ai-wizz` (Debian 12, Node 22 from NodeSource), prepared once
+  with `deploy/setup-ai-wizz.sh` (idempotent, backs up to
+  `/root/codex-backups/biptrix-*`).
+- **Layout:**
+  - `/opt/biptrix/releases/<pipeline>-<sha>` plus a `current` symlink, owned by `biptrix-deploy`.
+  - Data in `/var/lib/biptrix`: `biptrix.db`, `files/`, `backups/`, owned by `biptrix`.
+  - Environment in `/etc/biptrix/biptrix.env`, from the `PROD_ENV` CI variable.
+- **Pipeline** (`.gitlab-ci.yml`, `shell-deploy` runners on util1):
+  1. test;
+  2. release check (`npm ci`, `node --check`);
+  3. env install;
+  4. database backup;
+  5. atomic switch and restart;
+  6. `/readyz` check, directly and through nginx;
+  7. automatic rollback if the check fails.
+- **Backups:** daily at 03:30 by `biptrix-backup.timer`, plus one before every
+  deploy. The last 14 are kept. Uploaded files (`/var/lib/biptrix/files`) must
+  be covered by the host backup.
+- **Routing changes** (2026-10-08):
+  - `use_backend be_biptrix` plus the `be_biptrix` backend on both load
+    balancers; backups in `/root/codex-backups/talk-altbet-*`;
+  - internal DNS `talk.altbetexchange.com A 10.50.1.72` on dns1/dns2 (serial 142);
+  - `ai-wizz` received the standard root keys through the Salt state
+    `os-common.horia_root_ssh_access`.
+- **First run:** open `https://talk.altbetexchange.com/setup?token=<SETUP_TOKEN>`
+  (the token is in `PROD_ENV`). Then remove `SETUP_TOKEN` from `PROD_ENV`.

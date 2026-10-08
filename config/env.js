@@ -20,6 +20,8 @@ export function loadConfig(env = process.env) {
     // appSecretFile (keep it outside the release directory on servers).
     appSecret: env.APP_SECRET || '',
     appSecretFile: env.APP_SECRET_FILE || './data/.app-secret',
+    // Required in ?token= by the first-run /setup page when set.
+    setupToken: env.SETUP_TOKEN || '',
 
     db: {
       driver: env.DB_DRIVER === 'rqlite' ? 'rqlite' : 'sqlite',

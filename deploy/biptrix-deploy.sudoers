@@ -1,0 +1,5 @@
+# /etc/sudoers.d/biptrix-deploy on ai-wizz (mode 0440, check with visudo -cf).
+# The pipeline account may install the environment file, back up the
+# database, restart and inspect the one service. Nothing else.
+biptrix-deploy ALL=(root) NOPASSWD: /usr/local/sbin/biptrix-install-env, /usr/bin/systemctl restart biptrix.service, /usr/bin/systemctl is-active biptrix.service, /usr/bin/journalctl -u biptrix.service -n 80 --no-pager
+biptrix-deploy ALL=(biptrix) NOPASSWD: /usr/local/sbin/biptrix-backup

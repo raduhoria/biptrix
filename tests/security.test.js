@@ -256,6 +256,20 @@ describe('first-run setup', () => {
     assert.equal((await app.db.get('SELECT COUNT(*) AS n FROM memberships')).n, 1);
   });
 
+  test('with SETUP_TOKEN, /setup needs the token', async () => {
+    const guarded = await startApp({ SETUP_TOKEN: 'tok-123456' });
+    try {
+      const c = client(guarded.base);
+      assert.equal((await c.get('/setup')).status, 404);
+      assert.equal((await c.post('/setup', { form: { org_name: 'X', name: 'Y', email: 'y@x.ro', password: 'Parola12345' } })).status, 404);
+      assert.equal((await c.get('/setup?token=tok-123456')).status, 200);
+      const ok = await c.post('/setup', { form: { token: 'tok-123456', org_name: 'X', name: 'Y', email: 'y@x.ro', password: 'Parola12345' } });
+      assert.equal(ok.status, 303);
+    } finally {
+      await guarded.stop();
+    }
+  });
+
   test('the server listens on loopback unless HOST is set', async () => {
     const { loadConfig } = await import('../config/env.js');
     assert.equal(loadConfig({}).host, '127.0.0.1');

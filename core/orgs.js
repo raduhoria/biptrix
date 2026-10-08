@@ -16,18 +16,21 @@ export const isAdminRole = (role) => role === 'owner' || role === 'admin' || rol
 
 const INVITE_TTL_MS = 7 * 24 * 3600_000;
 
-export function createOrgs({ db, users, audit }) {
+export function createOrgs({ db, users, audit, events }) {
   const bySlug = (slug) => db.get('SELECT * FROM organizations WHERE slug = ?', [slug]);
   const byId = (id) => db.get('SELECT * FROM organizations WHERE id = ?', [id]);
 
-  const membership = (orgId, userId) => db.get("SELECT * FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'", [orgId, userId]);
+  // Active membership; an external collaborator whose access has expired
+  // has none (the maintenance job also marks it revoked).
+  const ACTIVE = "m.status = 'active' AND (m.access_expires_at IS NULL OR m.access_expires_at > ?)";
+  const membership = (orgId, userId) => db.get(`SELECT m.* FROM memberships m WHERE m.org_id = ? AND m.user_id = ? AND ${ACTIVE}`, [orgId, userId, nowIso()]);
 
   // Organizations the user can open, for the org switcher.
   const forUser = (userId) =>
     db.all(
       `SELECT o.id, o.slug, o.name, o.status, o.brand_color, m.role FROM memberships m JOIN organizations o ON o.id = m.org_id
-       WHERE m.user_id = ? AND m.status = 'active' ORDER BY o.name`,
-      [userId]
+       WHERE m.user_id = ? AND ${ACTIVE} ORDER BY o.name`,
+      [userId, nowIso()]
     );
 
   async function uniqueSlug(name) {
@@ -85,7 +88,7 @@ export function createOrgs({ db, users, audit }) {
   const members = (orgId, { search = '', includeRevoked = false } = {}) =>
     db.all(
       `SELECT u.id, u.email, u.name, u.status AS user_status, (u.totp_secret IS NOT NULL) AS mfa_enabled,
-              m.role, m.status, m.title, m.department, m.created_at
+              m.role, m.status, m.title, m.department, m.created_at, m.access_expires_at
        FROM memberships m JOIN users u ON u.id = m.user_id
        WHERE m.org_id = ? AND (? = 1 OR m.status = 'active')
          AND (? = '' OR u.email LIKE '%' || ? || '%' OR u.name LIKE '%' || ? || '%')
@@ -101,14 +104,17 @@ export function createOrgs({ db, users, audit }) {
   // concurrent demotions cannot both pass a check made beforehand.
   const keepsAnOwner = `(role != 'owner' OR (SELECT COUNT(*) FROM memberships WHERE org_id = ? AND role = 'owner' AND status = 'active') > 1)`;
 
+  // Only external collaborators have time-limited access: any other role
+  // drops the expiry, so a promoted collaborator is not revoked later.
   async function setRole(org, userId, role, actor, ip) {
     if (!ORG_ROLES.includes(role)) throw appError('invalid', 'Unknown role');
     const current = await membership(org.id, userId);
     if (!current) throw appError('not_found', 'Member not found');
     const [res] = await db.batch([
       [
-        `UPDATE memberships SET role = ?, updated_at = ? WHERE org_id = ? AND user_id = ? AND status = 'active' AND (? = 'owner' OR ${keepsAnOwner})`,
-        [role, nowIso(), org.id, userId, role, org.id],
+        `UPDATE memberships SET role = ?, access_expires_at = CASE WHEN ? = 'external' THEN access_expires_at END, updated_at = ?
+         WHERE org_id = ? AND user_id = ? AND status = 'active' AND (? = 'owner' OR ${keepsAnOwner})`,
+        [role, role, nowIso(), org.id, userId, role, org.id],
       ],
     ]);
     if (!res.changes) throw appError('conflict', 'An organization needs at least one owner', { reason: 'lastOwner' });
@@ -116,25 +122,42 @@ export function createOrgs({ db, users, audit }) {
   }
 
   // Revocation (spec §5, criterion 20): the membership ends, the user leaves
-  // every conversation of this org. Live sockets are closed by the caller
-  // (realtime.disconnectUser) right after.
+  // every conversation and meeting of this org. One atomic batch, every
+  // statement guarded by `cond` (evaluated before the membership row
+  // changes, which is the last statement): manual removal and expiry share
+  // it, and a concurrent extension or the last-owner rule stop all of it.
+  // Live sockets are closed by the caller (realtime.disconnectUser).
+  function revocationStatements(orgId, userId, { cond, condArgs, action, actor, ip }) {
+    const at = nowIso();
+    const guard = `EXISTS (SELECT 1 FROM memberships WHERE org_id = ? AND user_id = ? AND ${cond})`;
+    const guardArgs = [orgId, userId, ...condArgs];
+    const ev = events.statement({ orgId, userId, type: 'conversation.removed', data: { all: true } });
+    return [
+      [`DELETE FROM conversation_members WHERE user_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE org_id = ?) AND ${guard}`, [userId, orgId, ...guardArgs]],
+      [
+        `UPDATE meeting_participants SET state = 'removed', left_at = ? WHERE user_id = ? AND state IN ('lobby', 'admitted') AND meeting_id IN (SELECT id FROM meetings WHERE org_id = ?) AND ${guard}`,
+        [at, userId, orgId, ...guardArgs],
+      ],
+      [ev[0].replace(/VALUES \(([^)]*)\)$/s, `SELECT $1 WHERE ${guard}`), [...ev[1], ...guardArgs]],
+      audit.statement({ orgId, actor, action, resourceType: 'user', resourceId: userId, ip }, guard, guardArgs),
+      [`UPDATE memberships SET status = 'revoked', updated_at = ? WHERE org_id = ? AND user_id = ? AND ${cond}`, [at, orgId, userId, ...condArgs]],
+    ];
+  }
+
   async function revoke(org, userId, actor, ip) {
     if (!(await membership(org.id, userId))) throw appError('not_found', 'Member not found');
-    const at = nowIso();
-    const [res] = await db.batch([
-      [`UPDATE memberships SET status = 'revoked', updated_at = ? WHERE org_id = ? AND user_id = ? AND status = 'active' AND ${keepsAnOwner}`, [at, org.id, userId, org.id]],
-    ]);
-    if (!res.changes) throw appError('conflict', 'An organization needs at least one owner', { reason: 'lastOwner' });
-    await db.batch([
-      ['DELETE FROM conversation_members WHERE user_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE org_id = ?)', [userId, org.id]],
-      ["UPDATE meeting_participants SET state = 'removed', left_at = ? WHERE user_id = ? AND state IN ('lobby', 'admitted') AND meeting_id IN (SELECT id FROM meetings WHERE org_id = ?)", [at, userId, org.id]],
-      audit.statement({ orgId: org.id, actor, action: 'member.revoke', resourceType: 'user', resourceId: userId, ip }),
-    ]);
+    const statements = revocationStatements(org.id, userId, { cond: `status = 'active' AND ${keepsAnOwner}`, condArgs: [org.id], action: 'member.revoke', actor, ip });
+    const results = await db.batch(statements);
+    if (!results.at(-1).changes) throw appError('conflict', 'An organization needs at least one owner', { reason: 'lastOwner' });
+    events.notify();
   }
 
   // ------------------------------------------------------------------ invites
 
-  async function invite(org, { email, role = 'member' }, actor, ip) {
+  // Organization invitation. With `conversationId` (a Space) the person
+  // joins that Space on acceptance; `accessDays` sets an expiry on the
+  // membership (external collaborators).
+  async function invite(org, { email, role = 'member', conversationId = null, accessDays = null }, actor, ip) {
     const clean = canonicalEmail(email);
     if (!isEmail(clean)) throw appError('invalid', 'Invalid e-mail', { field: 'email' });
     if (!ORG_ROLES.includes(role) || (role === 'owner' && actor.orgRole !== 'owner')) throw appError('forbidden', 'Role not allowed');
@@ -144,16 +167,21 @@ export function createOrgs({ db, users, audit }) {
     const token = newToken();
     const id = newId();
     await db.batch([
-      ['UPDATE org_invites SET revoked_at = ? WHERE org_id = ? AND email = ? AND accepted_at IS NULL AND revoked_at IS NULL', [nowIso(), org.id, clean]],
-      ['INSERT INTO org_invites (id, org_id, email, role, token_hash, invited_by, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [id, org.id, clean, role, sha256(token), actor.id, isoIn(INVITE_TTL_MS), nowIso()]],
-      audit.statement({ orgId: org.id, actor, action: 'member.invite', resourceType: 'invite', resourceId: id, ip, data: { email: clean, role } }),
+      // A newer invitation replaces a pending one for the same person and target.
+      ['UPDATE org_invites SET revoked_at = ? WHERE org_id = ? AND email = ? AND conversation_id IS ? AND accepted_at IS NULL AND revoked_at IS NULL', [nowIso(), org.id, clean, conversationId]],
+      [
+        'INSERT INTO org_invites (id, org_id, email, role, token_hash, invited_by, expires_at, created_at, conversation_id, access_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, org.id, clean, role, sha256(token), actor.id, isoIn(INVITE_TTL_MS), nowIso(), conversationId, accessDays || null],
+      ],
+      audit.statement({ orgId: org.id, actor, action: 'member.invite', resourceType: 'invite', resourceId: id, ip, data: { email: clean, role, space: conversationId, access_days: accessDays || null } }),
     ]);
     return { id, token, email: clean, existingUser: !!existing };
   }
 
   async function inviteByToken(token) {
     const row = await db.get(
-      `SELECT i.*, o.name AS org_name, o.slug AS org_slug, o.status AS org_status FROM org_invites i JOIN organizations o ON o.id = i.org_id WHERE i.token_hash = ?`,
+      `SELECT i.*, o.name AS org_name, o.slug AS org_slug, o.status AS org_status, c.name AS space_name
+       FROM org_invites i JOIN organizations o ON o.id = i.org_id LEFT JOIN conversations c ON c.id = i.conversation_id WHERE i.token_hash = ?`,
       [sha256(token)]
     );
     if (!row || row.revoked_at || row.accepted_at) throw appError('not_found', 'Invitation not found');
@@ -161,8 +189,6 @@ export function createOrgs({ db, users, audit }) {
     return row;
   }
 
-  // Accept: an existing account just gains the membership; a new person
-  // creates their account in the same atomic batch.
   // Accept: an existing account just gains the membership; a new person
   // creates their account in the same atomic batch. The first statement
   // claims the invitation and checks the member limit at once; everything
@@ -189,22 +215,92 @@ export function createOrgs({ db, users, audit }) {
       ],
     ];
     if (userInsert) statements.push([userInsert[0].replace(/VALUES \(([^)]*)\)$/s, `SELECT $1 WHERE ${claimed}`), [...userInsert[1], ...claimArgs]]);
+    // A collaborator whose access expired but was not swept yet starts over:
+    // nothing from the old access (Spaces, meeting admissions) carries over.
+    const lapsed = `${claimed} AND EXISTS (SELECT 1 FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active' AND access_expires_at <= ?)`;
+    const lapsedArgs = [...claimArgs, inv.org_id, accountId, at];
+    statements.push(
+      [`DELETE FROM conversation_members WHERE user_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE org_id = ?) AND ${lapsed}`, [accountId, inv.org_id, ...lapsedArgs]],
+      [
+        `UPDATE meeting_participants SET state = 'removed', left_at = ? WHERE user_id = ? AND state IN ('lobby', 'admitted') AND meeting_id IN (SELECT id FROM meetings WHERE org_id = ?) AND ${lapsed}`,
+        [at, accountId, inv.org_id, ...lapsedArgs],
+      ]
+    );
+    const accessExpires = inv.access_days && inv.role === 'external' ? isoIn(inv.access_days * 86400_000) : null;
+    // A current membership keeps its role (a Space invitation grants access
+    // to the Space, not a role: an owner accepting an older one stays owner);
+    // only an external collaborator is upgraded by an invitation to a fuller
+    // role. A kept collaborator's access lasts until the later expiry.
+    const current = "memberships.status = 'active' AND (memberships.access_expires_at IS NULL OR memberships.access_expires_at > excluded.updated_at)";
+    const keep = `${current} AND NOT (memberships.role = 'external' AND excluded.role != 'external')`;
     statements.push(
       [
-        `INSERT INTO memberships (org_id, user_id, role, status, created_at, updated_at) SELECT ?, ?, ?, 'active', ?, ? WHERE ${claimed}
-         ON CONFLICT(org_id, user_id) DO UPDATE SET role = excluded.role, status = 'active', updated_at = excluded.updated_at`,
-        [inv.org_id, accountId, inv.role, at, at, ...claimArgs],
+        `INSERT INTO memberships (org_id, user_id, role, status, created_at, updated_at, access_expires_at) SELECT ?, ?, ?, 'active', ?, ?, ? WHERE ${claimed}
+         ON CONFLICT(org_id, user_id) DO UPDATE SET
+           role = CASE WHEN ${keep} THEN memberships.role ELSE excluded.role END,
+           access_expires_at = CASE WHEN NOT (${keep}) THEN excluded.access_expires_at
+             WHEN memberships.access_expires_at IS NULL OR excluded.access_expires_at IS NULL THEN NULL
+             ELSE MAX(memberships.access_expires_at, excluded.access_expires_at) END,
+           status = 'active', updated_at = excluded.updated_at`,
+        [inv.org_id, accountId, inv.role, at, at, accessExpires, ...claimArgs],
       ],
-      audit.statement({ orgId: inv.org_id, actor: { id: accountId, email: inv.email }, action: 'member.join', resourceType: 'invite', resourceId: inv.id }, claimed, claimArgs)
+      audit.statement({ orgId: inv.org_id, actor: { id: accountId, email: inv.email }, action: 'member.join', resourceType: 'invite', resourceId: inv.id, data: inv.conversation_id ? { space: inv.conversation_id } : null }, claimed, claimArgs)
     );
+    // Invited into a Space: joins it in the same batch (if it still exists
+    // and is not archived), and its members are told.
+    if (inv.conversation_id) {
+      const spaceOk = `${claimed} AND EXISTS (SELECT 1 FROM conversations WHERE id = ? AND org_id = ? AND archived_at IS NULL)`;
+      const spaceArgs = [...claimArgs, inv.conversation_id, inv.org_id];
+      const ev = events.statement({ orgId: inv.org_id, conversationId: inv.conversation_id, type: 'conversation.members', data: { id: inv.conversation_id, added: [accountId] } });
+      statements.push(
+        [
+          `INSERT OR IGNORE INTO conversation_members (conversation_id, user_id, role, last_read_seq, joined_at) SELECT ?, ?, 'member', 0, ? WHERE ${spaceOk}`,
+          [inv.conversation_id, accountId, at, ...spaceArgs],
+        ],
+        [ev[0].replace(/VALUES \(([^)]*)\)$/s, `SELECT $1 WHERE ${spaceOk}`), [...ev[1], ...spaceArgs]]
+      );
+    }
     const [claim] = await db.batch(statements);
     if (!claim.changes) {
       const now = await db.get('SELECT accepted_at, revoked_at FROM org_invites WHERE id = ?', [inv.id]);
       if (now?.accepted_at || now?.revoked_at) throw appError('not_found', 'Invitation not found');
       throw appError('quota_exceeded', 'Member limit reached', { reason: 'members' });
     }
-    return { orgSlug: inv.org_slug, userId: accountId };
+    if (inv.conversation_id) events.notify();
+    return { orgSlug: inv.org_slug, userId: accountId, conversationId: inv.conversation_id };
   }
+
+  // Collaborator access: extend from now, or end it (days = 0 → no expiry).
+  async function setAccessExpiry(org, userId, days, actor, ip) {
+    const expires = days > 0 ? isoIn(days * 86400_000) : null;
+    await db.batch([
+      ["UPDATE memberships SET access_expires_at = ?, updated_at = ? WHERE org_id = ? AND user_id = ? AND status = 'active' AND role = 'external'", [expires, nowIso(), org.id, userId]],
+      audit.statement({ orgId: org.id, actor, action: 'member.access_extend', resourceType: 'user', resourceId: userId, ip, data: { expires } }),
+    ]);
+  }
+
+  // Expired collaborators: the same revocation as a manual removal. The
+  // expiry is re-checked inside the batch, so an extension made after the
+  // list was read wins.
+  async function expireCollaborators() {
+    const now = nowIso();
+    const rows = await db.all("SELECT org_id, user_id FROM memberships WHERE status = 'active' AND access_expires_at IS NOT NULL AND access_expires_at <= ? LIMIT 500", [now]);
+    const expired = [];
+    for (const r of rows) {
+      const cond = `status = 'active' AND access_expires_at IS NOT NULL AND access_expires_at <= ? AND ${keepsAnOwner}`;
+      const results = await db.batch(revocationStatements(r.org_id, r.user_id, { cond, condArgs: [now, r.org_id], action: 'member.expire', actor: { label: 'system' } }));
+      if (results.at(-1).changes) expired.push(r);
+    }
+    if (expired.length) events.notify();
+    return expired;
+  }
+
+  // Pending Space invitations (shown to the Space's moderators).
+  const spaceInvites = (orgId, conversationId) =>
+    db.all(
+      'SELECT id, email, expires_at, created_at FROM org_invites WHERE org_id = ? AND conversation_id = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC',
+      [orgId, conversationId, nowIso()]
+    );
 
   const pendingInvites = (orgId) =>
     db.all('SELECT id, email, role, expires_at, created_at FROM org_invites WHERE org_id = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC', [orgId, nowIso()]);
@@ -254,6 +350,9 @@ export function createOrgs({ db, users, audit }) {
     invite,
     inviteByToken,
     acceptInvite,
+    setAccessExpiry,
+    expireCollaborators,
+    spaceInvites,
     pendingInvites,
     revokeInvite,
     requireOrg,

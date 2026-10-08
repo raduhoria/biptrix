@@ -1,0 +1,21 @@
+#!/bin/bash
+# /usr/local/sbin/biptrix-backup on ai-wizz (root:root 0755), run as biptrix:
+# by the pipeline before every deploy, and daily by biptrix-backup.timer.
+# A consistent online copy (VACUUM INTO) of the SQLite database, gzip, and
+# the last 14 kept. Files (FILES_DIR) are not copied here: include
+# /var/lib/biptrix/files in the host backup.
+set -euo pipefail
+DB=/var/lib/biptrix/biptrix.db
+DIR=/var/lib/biptrix/backups
+KEEP=14
+[ -f "$DB" ] || { echo "no database yet, nothing to back up"; exit 0; }
+mkdir -p "$DIR"
+OUT="$DIR/biptrix-$(date -u +%Y%m%dT%H%M%SZ).db"
+node --disable-warning=ExperimentalWarning -e '
+  const { DatabaseSync } = require("node:sqlite");
+  const db = new DatabaseSync(process.argv[1], { readOnly: true });
+  db.exec(`VACUUM INTO ${JSON.stringify(process.argv[2]).replace(/"/g, "\x27")}`);
+' "$DB" "$OUT"
+gzip -9 "$OUT"
+ls -1t "$DIR"/biptrix-*.db.gz | tail -n +$((KEEP + 1)) | xargs -r rm -f
+echo "backup $OUT.gz ($(du -h "$OUT.gz" | cut -f1))"

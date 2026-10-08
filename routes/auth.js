@@ -1,10 +1,11 @@
+import { timingSafeEqual } from 'node:crypto';
 import { readForm } from '../core/router.js';
 import { LOCALE_COOKIE, normalizeLocale, translateError } from '../core/i18n.js';
 import { newTotpSecret, totpUri, verifyTotp } from '../core/totp.js';
 import { canonicalEmail, isoIn, newId, newToken, nowIso, sha256 } from '../core/util.js';
-import { accountView, forgotView, inviteView, loginView, mfaLoginView, orgPickerView, resetView, setupView } from '../views/auth.js';
+import { accountView, codeLoginView, forgotView, inviteView, loginView, mfaLoginView, orgPickerView, resetView, setupView } from '../views/auth.js';
 import { messagePage } from '../views/layout.js';
-import { resetEmail } from '../views/emails.js';
+import { loginCodeEmail, resetEmail } from '../views/emails.js';
 
 // Only same-site paths are accepted as redirect targets.
 export const safeNext = (value, fallback = '/') => (typeof value === 'string' && /^\/(?!\/)[^\\\s]*$/.test(value) ? value : fallback);
@@ -12,7 +13,7 @@ export const safeNext = (value, fallback = '/') => (typeof value === 'string' &&
 const RESET_TTL_MS = 3600_000;
 const MFA_COOKIE = 'mfa_setup';
 
-export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, audit, db, secretBox, realtime }) {
+export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, audit, db, secretBox, realtime, loginCodes }) {
   const { requireUser } = auth;
 
   router.get('/', async (req, res) => {
@@ -25,9 +26,15 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
 
   // ------------------------------------------------------------------ setup
   // First run only: creates the platform operator and the first organization.
+  // With SETUP_TOKEN set (production), the first-run page only opens with
+  // ?token=<SETUP_TOKEN>: a fresh public deployment cannot be claimed by
+  // whoever finds it first.
+  const setupAllowed = (token) => !config.setupToken || (typeof token === 'string' && token.length === config.setupToken.length && timingSafeEqual(Buffer.from(token), Buffer.from(config.setupToken)));
+
   router.get('/setup', async (req, res) => {
     if (await users.count()) return res.redirect('/login');
-    res.send(setupView({ t: req.t }));
+    if (!setupAllowed(req.query.token)) return res.status(404).send(messagePage({ t: req.t, title: req.t('setup.title'), message: req.t('setup.needsToken'), back: '/' }));
+    res.send(setupView({ t: req.t, token: req.query.token || '' }));
   });
 
   // The operator, the first organization and its owner membership are one
@@ -36,6 +43,7 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
   router.post('/setup', async (req, res) => {
     if (await users.count()) return res.redirect('/login');
     const form = Object.fromEntries(await readForm(req));
+    if (!setupAllowed(form.token)) return res.status(404).send(messagePage({ t: req.t, title: req.t('setup.title'), message: req.t('setup.needsToken'), back: '/' }));
     try {
       const password = auth.validatePassword(form.password);
       const created = users.insertStatement({ email: form.email, name: form.name, passwordHash: await auth.hashPassword(password), platformRole: 'operator', locale: req.t.locale });
@@ -48,7 +56,7 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
       await auth.createSession(res, req, created.id);
       res.redirect(`/o/${(await orgs.byId(org.id)).slug}`);
     } catch (err) {
-      res.status(400).send(setupView({ t: req.t, values: form, error: translateError(req.t, err) }));
+      res.status(400).send(setupView({ t: req.t, values: form, token: form.token || '', error: translateError(req.t, err) }));
     }
   });
 
@@ -75,6 +83,53 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     }
     await auth.clearFailures(`acct:${email}`);
     await auth.createSession(res, req, user.id);
+    if (user.mfa_enabled) return res.redirect(`/login/mfa?next=${encodeURIComponent(next)}`);
+    res.redirect(next);
+  });
+
+  // ------------------------------------------------- passwordless sign-in
+  // E-mail → 6-digit code → session. The answer is the same whether or not
+  // the address has an account. MFA, when enabled, still follows.
+  router.get('/login/code', (req, res) => {
+    if (req.user) return res.redirect(safeNext(req.query.next));
+    res.send(codeLoginView({ t: req.t, email: req.query.email || '', next: safeNext(req.query.next, '') }));
+  });
+
+  router.post('/login/code', async (req, res) => {
+    const form = await readForm(req);
+    const email = canonicalEmail(form.get('email'));
+    const next = safeNext(form.get('next'), '/');
+    if (await auth.tooManyFailures(`code-ip:${req.ip}`, 30)) return res.status(429).send(codeLoginView({ t: req.t, email, next, error: req.t('auth.tooMany') }));
+    await auth.recordFailure(`code-ip:${req.ip}`);
+    const user = await users.byEmail(email);
+    let notice = req.t('auth.codeSent', { email });
+    if (user?.status === 'active') {
+      try {
+        const code = await loginCodes.issue(user.id);
+        mailer.queue({ to: user.email, ...loginCodeEmail({ t: req.t, code }) });
+      } catch (err) {
+        if (err.details?.reason === 'wait') notice = req.t('guest.wait', { seconds: err.details.seconds });
+        else if (err.code === 'rate_limited') return res.status(429).send(codeLoginView({ t: req.t, email, next, error: req.t('auth.tooMany') }));
+      }
+    }
+    res.send(codeLoginView({ t: req.t, email, next, step: 'code', notice }));
+  });
+
+  router.post('/login/code/verify', async (req, res) => {
+    const form = await readForm(req);
+    const email = canonicalEmail(form.get('email'));
+    const next = safeNext(form.get('next'), '/');
+    const fail = (key, status = 401) => res.status(status).send(codeLoginView({ t: req.t, email, next, step: 'code', error: req.t(key) }));
+    if (await auth.tooManyFailures(`acct:${email}`, 8)) return fail('auth.tooMany', 429);
+    const user = await users.byEmail(email);
+    const result = user?.status === 'active' ? await loginCodes.verify(user.id, form.get('code')) : 'invalid';
+    if (result !== 'ok') {
+      await auth.recordFailure(`acct:${email}`);
+      return fail(result === 'expired' ? 'guest.otpExpired' : result === 'locked' ? 'guest.otpLocked' : 'auth.badCode');
+    }
+    await auth.clearFailures(`acct:${email}`);
+    await auth.createSession(res, req, user.id);
+    await audit.log({ actor: user, action: 'auth.login_code', resourceType: 'user', resourceId: user.id, ip: req.ip });
     if (user.mfa_enabled) return res.redirect(`/login/mfa?next=${encodeURIComponent(next)}`);
     res.redirect(next);
   });
@@ -178,16 +233,19 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     try {
       if (req.user) {
         if (req.user.email !== invite.email) return res.redirect(`/invite/${encodeURIComponent(req.params.token)}`);
-        const { orgSlug } = await orgs.acceptInvite(req.params.token, { userId: req.user.id });
-        return res.redirect(`/o/${orgSlug}`);
+        const { orgSlug, conversationId } = await orgs.acceptInvite(req.params.token, { userId: req.user.id });
+        return res.redirect(`/o/${orgSlug}${conversationId ? `/c/${conversationId}` : ''}`);
       }
       if (invite.has_account) return res.redirect(`/login?next=${encodeURIComponent(`/invite/${req.params.token}`)}&email=${encodeURIComponent(invite.email)}`);
+      // The link itself proves control of the address; a password is
+      // optional (without one, sign-in is by e-mail code).
       const form = await readForm(req);
-      const passwordHash = await auth.hashPassword(auth.validatePassword(form.get('password')));
-      const { orgSlug, userId } = await orgs.acceptInvite(req.params.token, { name: form.get('name'), passwordHash });
+      const password = form.get('password') || '';
+      const passwordHash = password ? await auth.hashPassword(auth.validatePassword(password)) : null;
+      const { orgSlug, userId, conversationId } = await orgs.acceptInvite(req.params.token, { name: form.get('name'), passwordHash });
       await users.setLocale(userId, req.t.locale);
       await auth.createSession(res, req, userId);
-      res.redirect(`/o/${orgSlug}`);
+      res.redirect(`/o/${orgSlug}${conversationId ? `/c/${conversationId}` : ''}`);
     } catch (err) {
       res.status(err.status || 400).send(inviteView({ t: req.t, invite, token: req.params.token, user: req.user, error: translateError(req.t, err) }));
     }
@@ -197,7 +255,8 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
   async function renderAccount(req, res, { notice = '', error = '', mfaSetup = null, status = 200 } = {}) {
     const sessions = await db.all('SELECT id_hash, ip, user_agent, last_seen_at FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen_at DESC LIMIT 20', [req.user.id, nowIso()]);
     const list = await orgs.forUser(req.user.id);
-    res.status(status).send(accountView({ t: req.t, user: req.user, orgs: list, sessions, currentHash: req.session.id_hash, notice, error, mfaSetup, next: safeNext(req.query.next, '') }));
+    const hasPassword = !!(await users.credentials(req.user.id))?.password_hash;
+    res.status(status).send(accountView({ t: req.t, user: req.user, orgs: list, sessions, currentHash: req.session.id_hash, notice, error, mfaSetup, hasPassword, next: safeNext(req.query.next, '') }));
   }
 
   router.get('/account', requireUser, (req, res) => {
@@ -215,7 +274,9 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const form = await readForm(req);
     try {
       const creds = await users.credentials(req.user.id);
-      if (!(await auth.verifyPassword(form.get('current') || '', creds.password_hash))) return renderAccount(req, res, { error: req.t('account.wrongPassword'), status: 400 });
+      // Accounts created without a password (e-mail code sign-in) set their
+      // first one without a current password.
+      if (creds.password_hash && !(await auth.verifyPassword(form.get('current') || '', creds.password_hash))) return renderAccount(req, res, { error: req.t('account.wrongPassword'), status: 400 });
       await users.setPasswordHash(req.user.id, await auth.hashPassword(auth.validatePassword(form.get('password'))));
       await auth.destroyUserSessions(req.user.id, req.session.id_hash);
       await audit.log({ actor: req.user, action: 'auth.password_change', resourceType: 'user', resourceId: req.user.id, ip: req.ip });
@@ -254,6 +315,7 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
 
   router.post('/account/mfa/enable', requireUser, async (req, res) => {
     if (req.user.mfa_enabled) return renderAccount(req, res, { error: req.t('account.mfaAlreadyOn'), status: 409 });
+    if (!(await users.credentials(req.user.id))?.password_hash) return renderAccount(req, res, { error: req.t('account.mfaNeedsPassword'), status: 400 });
     const form = await readForm(req);
     const secret = pendingSecret(req);
     const key = `mfa-enroll:${req.user.id}`;

@@ -10,6 +10,7 @@ import { createEvents } from './core/events.js';
 import { createFiles } from './core/files.js';
 import { clientIp, isSecure, sameOrigin, securityHeaders } from './core/http.js';
 import { createTranslator, resolveLocale, translateError } from './core/i18n.js';
+import { createLoginCodes } from './core/login-codes.js';
 import { createMailer } from './core/mailer.js';
 import { createMedia } from './core/media.js';
 import { createRooms } from './core/meeting-rooms.js';
@@ -44,14 +45,15 @@ export async function createApp(config, { quiet = false } = {}) {
   const audit = createAudit(db);
   const users = createUsers(db);
   const auth = createAuth({ db, users, config, secretBox });
-  const orgs = createOrgs({ db, users, audit });
-  const policies = createPolicies({ db, audit });
   const events = createEvents({ db, nodeId: config.nodeId, cluster: config.cluster });
-  const chat = createChat({ db, events, audit });
+  const orgs = createOrgs({ db, users, audit, events });
+  const policies = createPolicies({ db, audit });
+  const chat = createChat({ db, events, audit, policies });
   const files = createFiles({ db, config, policies });
   const meetings = createMeetings({ db, policies, audit, appSecret });
   const media = createMedia(config);
   const mailer = createMailer({ smtp: config.smtp, quiet });
+  const loginCodes = createLoginCodes({ db, secret: appSecret });
   const rooms = createRooms({ auth, orgs, meetings, media });
   let realtime = null;
   const notifier = createNotifier({ db, mailer, policies, config, isOnline: (orgId, userId) => realtime.isOnline(orgId, userId) });
@@ -79,7 +81,7 @@ export async function createApp(config, { quiet = false } = {}) {
 
   const router = createRouter({ onError });
   registerStatic(router, path.join(import.meta.dirname, 'public'), { dev: config.dev });
-  const deps = { db, config, auth, users, orgs, policies, events, chat, files, meetings, media, mailer, rooms, realtime, notifier, audit, secretBox, health };
+  const deps = { db, config, loginCodes, auth, users, orgs, policies, events, chat, files, meetings, media, mailer, rooms, realtime, notifier, audit, secretBox, health };
   registerAuthRoutes(router, deps);
   registerChatRoutes(router, deps);
   registerMeetingRoutes(router, deps);
@@ -128,6 +130,7 @@ export async function createApp(config, { quiet = false } = {}) {
   async function maintenance() {
     try {
       await auth.pruneExpired();
+      for (const r of await orgs.expireCollaborators()) realtime.disconnectUser(r.user_id, r.org_id);
       await events.prune(7);
       await files.pruneOrphans();
       for (const row of await db.all("SELECT org_id, json_extract(data, '$.message_retention_days') AS days FROM policies WHERE json_extract(data, '$.message_retention_days') > 0")) {

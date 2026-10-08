@@ -45,6 +45,18 @@ CREATE TABLE IF NOT EXISTS email_tokens (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_email_tokens_hash ON email_tokens(token_hash);
 
+-- Passwordless sign-in: one-time codes sent by e-mail (hash only).
+CREATE TABLE IF NOT EXISTS login_codes (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_login_codes_user ON login_codes(user_id, created_at);
+
 -- Failed sign-in / OTP attempts per key, sliding window (credential stuffing).
 CREATE TABLE IF NOT EXISTS auth_failures (
   key TEXT NOT NULL,

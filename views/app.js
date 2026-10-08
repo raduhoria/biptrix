@@ -76,7 +76,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
       ${icon('search')}<input class="form-control" type="search" name="q" placeholder="${e('client.searchPlaceholder')}" aria-label="${e('client.search')}" autocomplete="off">
     </form>
 
-    <div class="dropdown px-3 mb-2">
+    <div class="dropdown px-3 mb-2"${boot.perms.directory || boot.perms.spaces || boot.perms.meetings ? '' : ' hidden'}>
       <button class="btn btn-primary w-100 new-btn" data-bs-toggle="dropdown">${icon('plus')} ${e('client.new')}</button>
       <ul class="dropdown-menu shadow w-100">
         ${boot.perms.directory ? `<li><button class="dropdown-item" data-action="new-dm">${icon('user')} ${e('client.newDm')}</button></li>
@@ -127,6 +127,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
           </div>
         </div>
       </header>
+      <div class="ext-banner" id="ext-banner" hidden></div>
       <div class="msg-scroll" id="msg-scroll">
         <div class="msg-top" id="msg-top"></div>
         <div class="msg-list" id="msg-list"></div>

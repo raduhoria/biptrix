@@ -1,0 +1,192 @@
+# Deployment of Biptrix to ai-wizz (10.50.1.126), served as
+# https://talk.altbetexchange.com. One-time host setup: deploy/setup-ai-wizz.sh.
+# Routing: Cloudflare -> lb1/lb2 HAProxy (be_biptrix) -> ai-wizz nginx :443
+# -> 127.0.0.1:3400 (biptrix.service).
+#
+# Every push to main: test, then deploy a new release (with a database backup
+# first, and an automatic rollback if the new release fails its health check).
+#
+# CI/CD VARIABLES — two, both type File and protected (main is protected):
+#   PROD_ENV                 The whole production environment
+#                            (template: deploy/biptrix.env.example). Installed
+#                            on ai-wizz as /etc/biptrix/biptrix.env at every
+#                            deploy; change it, then re-run the deploy.
+#   BIPTRIX_DEPLOY_SSH_KEY   Private key of the biptrix-deploy account on
+#                            ai-wizz. It owns the release tree and may only
+#                            install the env file, back up the database and
+#                            restart the service (deploy/biptrix-deploy.sudoers).
+#
+# Rollback by hand: re-run the deploy job of an earlier pipeline
+# (Deployments > Environments), or on ai-wizz point /opt/biptrix/current at the
+# previous release and `systemctl restart biptrix`. Database backups:
+# /var/lib/biptrix/backups (also daily, biptrix-backup.timer).
+
+stages:
+  - test
+  - deploy
+
+default:
+  tags:
+    - shell-deploy
+
+variables:
+  DEPLOY_HOST: "10.50.1.126"
+  DEPLOY_USER: "biptrix-deploy"
+  DEPLOY_BASE: "/opt/biptrix"
+  APP_PORT: "3400"
+  PUBLIC_HOST: "talk.altbetexchange.com"
+  KEEP_RELEASES: "5"
+
+.on_main: &on_main
+  - if: '$CI_COMMIT_BRANCH == "main"'
+  - when: never
+
+# Shell runners keep their home between jobs, so the key goes to a job-scoped
+# directory that after_script removes even when the job fails.
+.ssh_setup: &ssh_setup
+  - export SSH_DIR="${CI_BUILDS_DIR:-/tmp}/.ssh-${CI_JOB_ID}"
+  - mkdir -p "${SSH_DIR}" && chmod 700 "${SSH_DIR}"
+  # File variables arrive without a trailing newline and maybe with CRLF; OpenSSH rejects both.
+  - tr -d '\r' < "${BIPTRIX_DEPLOY_SSH_KEY}" > "${SSH_DIR}/id_ed25519"
+  - printf '\n' >> "${SSH_DIR}/id_ed25519"
+  - chmod 400 "${SSH_DIR}/id_ed25519"
+  - ssh-keygen -y -f "${SSH_DIR}/id_ed25519" > /dev/null
+  # Pinned host key (SHA256:XHrtcaNV1XEm7lPX+urvmtzaQBP28bU2Q6sbCwwurtU). Note:
+  # ai-wizz shares this clone-base key with other hosts (see the KB page
+  # infrastructure/vm-clone-build-runbook.md), so the IP is part of the pin.
+  - echo "10.50.1.126 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDzVbQr9kDgVx4nYqoF8F/I5eemnoYw4CH+AJU7FwMBf" > "${SSH_DIR}/known_hosts"
+  - export SSH_OPTS="-i ${SSH_DIR}/id_ed25519 -o UserKnownHostsFile=${SSH_DIR}/known_hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=15"
+  - export TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
+
+.ssh_cleanup: &ssh_cleanup
+  - rm -rf "${CI_BUILDS_DIR:-/tmp}/.ssh-${CI_JOB_ID}" || true
+
+# A missing variable should fail in seconds and name itself, not halfway through a deploy.
+verify-deploy-config:
+  stage: test
+  rules: *on_main
+  script:
+    - test -s "${PROD_ENV}" || { echo "PROD_ENV is missing or empty" >&2; exit 1; }
+    - test -s "${BIPTRIX_DEPLOY_SSH_KEY}" || { echo "BIPTRIX_DEPLOY_SSH_KEY is missing or empty" >&2; exit 1; }
+    - |
+      for key in HOST PORT APP_URL SQLITE_PATH FILES_DIR APP_SECRET; do
+        grep -qE "^${key}=.+" "${PROD_ENV}" || { echo "PROD_ENV has no ${key}" >&2; exit 1; }
+      done
+    - echo "Deploy configuration is present"
+
+test:
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  script:
+    - node --version
+    - npm ci --no-audit --no-fund
+    - npm test
+
+deploy:
+  stage: deploy
+  needs: ["test", "verify-deploy-config"]
+  rules: *on_main
+  resource_group: biptrix-production
+  environment:
+    name: production
+    url: https://talk.altbetexchange.com
+  before_script:
+    - *ssh_setup
+  after_script:
+    - *ssh_cleanup
+  script:
+    - export RELEASE_ID="${CI_PIPELINE_ID}-${CI_COMMIT_SHORT_SHA}"
+    - export RELEASE_DIR="${DEPLOY_BASE}/releases/${RELEASE_ID}"
+    - echo "Release ${RELEASE_ID}"
+    # Only tracked files travel: no .env, database or local secret can ride along.
+    - git archive --format=tar HEAD | gzip -9 > release.tar.gz
+    - ls -lh release.tar.gz
+    - ssh ${SSH_OPTS} "${TARGET}" "mkdir -p '${RELEASE_DIR}'"
+    - scp -q ${SSH_OPTS} release.tar.gz "${TARGET}:${RELEASE_DIR}/"
+
+    # Unpack, install production dependencies and check the release before
+    # anything is switched, so a broken release never becomes the live one.
+    - |
+      ssh ${SSH_OPTS} "${TARGET}" "
+        set -e
+        cd '${RELEASE_DIR}'
+        tar -xzf release.tar.gz
+        rm -rf release.tar.gz tests deploy .gitlab-ci.yml
+        npm ci --omit=dev --no-audit --no-fund --loglevel=error
+        for f in server.js app.js \$(find config core db routes views locales public/js -name '*.js'); do
+          node --check \"\$f\"
+        done
+        chmod -R g+rX,o-rwx .
+        echo 'release checked'
+      "
+
+    # The environment is piped from the variable straight into the root-owned
+    # installer: never written in the job workspace, never echoed, never in a release.
+    - set +x
+    - |
+      { cat "${PROD_ENV}"; printf '\n'; } | ssh ${SSH_OPTS} "${TARGET}" "sudo -n /usr/local/sbin/biptrix-install-env"
+
+    # A consistent copy of the database before new code (and its migrations) runs.
+    - ssh ${SSH_OPTS} "${TARGET}" "sudo -n -u biptrix /usr/local/sbin/biptrix-backup"
+
+    - echo "Switching current to the new release."
+    - |
+      ssh ${SSH_OPTS} "${TARGET}" "
+        set -e
+        readlink '${DEPLOY_BASE}/current' > '${DEPLOY_BASE}/previous.txt' || true
+        ln -sfn '${RELEASE_DIR}' '${DEPLOY_BASE}/current.tmp'
+        mv -T '${DEPLOY_BASE}/current.tmp' '${DEPLOY_BASE}/current'
+        readlink '${DEPLOY_BASE}/current'
+        sudo -n /usr/bin/systemctl restart biptrix.service
+      "
+
+    # Health: the process answers and its database is readable (/readyz), from
+    # inside the origin and through nginx. Roll back on failure.
+    - |
+      check='
+        set -e
+        for i in $(seq 1 30); do
+          if curl -fsS --max-time 3 http://127.0.0.1:'${APP_PORT}'/readyz >/dev/null 2>&1; then break; fi
+          sleep 1
+        done
+        curl -fsS --max-time 3 http://127.0.0.1:'${APP_PORT}'/readyz
+        echo
+        curl -fsS --max-time 5 -o /dev/null -w "nginx /login %{http_code}\n" --resolve '${PUBLIC_HOST}':443:127.0.0.1 -k https://'${PUBLIC_HOST}'/login
+        sudo -n /usr/bin/systemctl is-active biptrix.service
+      '
+      if ! ssh ${SSH_OPTS} "${TARGET}" "${check}"; then
+        echo "Health check failed. Service log:" >&2
+        ssh ${SSH_OPTS} "${TARGET}" "sudo -n /usr/bin/journalctl -u biptrix.service -n 80 --no-pager" >&2 || true
+        echo "Rolling back to the previous release." >&2
+        ssh ${SSH_OPTS} "${TARGET}" "
+          set -e
+          prev=\$(cat '${DEPLOY_BASE}/previous.txt' || true)
+          if [ -n \"\$prev\" ] && [ -d \"\$prev\" ]; then
+            ln -sfn \"\$prev\" '${DEPLOY_BASE}/current.tmp'
+            mv -T '${DEPLOY_BASE}/current.tmp' '${DEPLOY_BASE}/current'
+            sudo -n /usr/bin/systemctl restart biptrix.service
+            echo \"rolled back to \$prev\"
+          else
+            echo 'no previous release recorded; current left as is' >&2
+          fi
+        "
+        exit 1
+      fi
+
+    # Keep the last releases (never the live or the previous one).
+    - |
+      ssh ${SSH_OPTS} "${TARGET}" "
+        set -e
+        cd '${DEPLOY_BASE}/releases'
+        live=\$(readlink '${DEPLOY_BASE}/current'); live=\${live##*/}
+        prev=\$(cat '${DEPLOY_BASE}/previous.txt' 2>/dev/null || true); prev=\${prev##*/}
+        ls -1t | tail -n +\$((${KEEP_RELEASES} + 1)) | while read -r old; do
+          [ \"\$old\" = \"\$live\" ] && continue
+          [ \"\$old\" = \"\$prev\" ] && continue
+          echo \"removing \$old\"
+          rm -rf -- \"\$old\"
+        done
+      "
+    - echo "Deployed ${RELEASE_ID}."

@@ -1,0 +1,47 @@
+# /etc/systemd/system/biptrix.service on ai-wizz (10.50.1.126).
+# The pipeline publishes releases under /opt/biptrix/releases and moves the
+# `current` symlink; the environment comes from the PROD_ENV GitLab variable
+# through /usr/local/sbin/biptrix-install-env.
+[Unit]
+Description=Biptrix chat and meetings (talk.altbetexchange.com)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/biptrix/current/server.js
+ConditionPathExists=/etc/biptrix/biptrix.env
+
+[Service]
+Type=simple
+User=biptrix
+Group=biptrix
+WorkingDirectory=/opt/biptrix/current
+EnvironmentFile=/etc/biptrix/biptrix.env
+Environment=HOME=/var/lib/biptrix
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server.js
+Restart=on-failure
+RestartSec=3
+# SIGTERM closes sockets and the database (server.js); give it a moment.
+TimeoutStopSec=15
+# Open WebSockets and uploads.
+LimitNOFILE=65536
+
+MemoryHigh=1536M
+MemoryMax=2G
+CPUQuota=300%
+TasksMax=512
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/biptrix
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

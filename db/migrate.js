@@ -8,6 +8,16 @@ const MIGRATIONS = [
   // Who accepted an invitation: lets the acceptance batch tell whether its
   // own conditional update won.
   [2, ['ALTER TABLE org_invites ADD COLUMN accepted_by TEXT']],
+  // External collaborators: an invitation can target a Space (joined on
+  // acceptance) and carry an access duration; their membership can expire.
+  [
+    3,
+    [
+      'ALTER TABLE org_invites ADD COLUMN conversation_id TEXT',
+      'ALTER TABLE org_invites ADD COLUMN access_days INTEGER',
+      'ALTER TABLE memberships ADD COLUMN access_expires_at TEXT',
+    ],
+  ],
 ];
 
 export async function runMigrations(db) {

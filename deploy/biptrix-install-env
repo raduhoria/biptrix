@@ -1,0 +1,28 @@
+#!/bin/bash
+# /usr/local/sbin/biptrix-install-env on ai-wizz (root:root 0755).
+# The pipeline pipes the PROD_ENV GitLab variable into it on every deploy:
+#   ssh biptrix-deploy@ai-wizz 'sudo -n /usr/local/sbin/biptrix-install-env' < PROD_ENV
+# It writes /etc/biptrix/biptrix.env atomically as root:biptrix 0640, so the
+# deploy account can install the file but never read it back.
+set -euo pipefail
+TARGET=/etc/biptrix/biptrix.env
+TMP="$(mktemp /etc/biptrix/.biptrix.env.XXXXXX)"
+trap 'rm -f "$TMP"' EXIT
+
+# CRLF from a paste through Windows would put "\r" into every value.
+tr -d '\r' > "$TMP"
+
+[ -s "$TMP" ] || { echo "the environment arrived empty" >&2; exit 1; }
+if grep -vnE '^\s*(#.*)?$|^[A-Z][A-Z0-9_]*=' "$TMP" >&2; then
+  echo "the lines above are not KEY=value" >&2
+  exit 1
+fi
+for key in HOST PORT APP_URL SQLITE_PATH FILES_DIR APP_SECRET; do
+  grep -qE "^${key}=.+" "$TMP" || { echo "$key is missing or empty" >&2; exit 1; }
+done
+
+chown root:biptrix "$TMP"
+chmod 0640 "$TMP"
+mv -f "$TMP" "$TARGET"
+trap - EXIT
+echo "environment installed ($(grep -cE '^[A-Z]' "$TARGET") settings)"

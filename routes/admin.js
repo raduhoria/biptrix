@@ -98,6 +98,15 @@ export function registerAdminRoutes(router, { auth, orgs, chat, policies, audit,
     }
   });
 
+  // Collaborator access: extend by the policy's duration from today.
+  router.post('/o/:org/admin/members/:uid/extend', ...gate('members.manage'), async (req, res) => {
+    // (Read directly: an expired, not yet revoked membership can be extended.)
+    const target = await db.get("SELECT role FROM memberships WHERE org_id = ? AND user_id = ? AND status = 'active'", [req.org.id, req.params.uid]);
+    if (target?.role !== 'external') return res.redirect(`${base(req)}/members?error=forbidden`);
+    await orgs.setAccessExpiry(req.org, req.params.uid, (await policies.get(req.org.id)).collaborator_access_days, req.user, req.ip);
+    res.redirect(`${base(req)}/members?notice=saved`);
+  });
+
   // ----------------------------------------------------------------- spaces
   router.get('/o/:org/admin/spaces', ...gate('spaces.manage'), async (req, res) => {
     res.send(spacesView({ t: req.t, req, spaces: await chat.allSpaces(req.org), ...flash(req) }));
