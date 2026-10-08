@@ -10,6 +10,9 @@
 #   biptrix.env    the environment, including APP_SECRET (without it MFA
 #                  secrets cannot be decrypted)
 #   SHA256SUMS
+# A backup without the secret is refused (exit 1). Runs are serialized
+# (flock: the pipeline and the timer may start together) and each one works
+# in its own temporary directory.
 # The database is copied first: a file uploaded meanwhile is only an extra.
 # Every backup is then restored into a temporary directory and checked
 # (integrity_check, every attachment row has its file); a failed check
@@ -31,12 +34,20 @@ KEEP=14
 mkdir -p "$DIR"
 chmod 0700 "$DIR"
 
-NAME="biptrix-$(date -u +%Y%m%dT%H%M%SZ)"
-WORK="$DIR/.$NAME"
+# The secret first: without it the MFA secrets in the backup are useless.
+[ -r "$ENV_FILE" ] || { echo "cannot read $ENV_FILE (APP_SECRET is needed for a usable backup)" >&2; exit 1; }
+grep -qE '^APP_SECRET=.+' "$ENV_FILE" || { echo "APP_SECRET is missing or empty in $ENV_FILE" >&2; exit 1; }
+
+exec 9>"$DIR/.lock"
+flock -w 900 9 || { echo "another backup is still running" >&2; exit 1; }
+# Holding the lock: work directories still present belong to dead runs.
+find "$DIR" -mindepth 1 -maxdepth 1 -name '.work.*' -exec rm -rf {} +
+
+NAME="biptrix-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+WORK="$(mktemp -d "$DIR/.work.XXXXXX")"
 OUT="$DIR/$NAME"
 CHECK="$(mktemp -d)"
 trap 'rm -rf "$WORK" "$CHECK"' EXIT
-mkdir "$WORK"
 
 node --disable-warning=ExperimentalWarning -e '
   const { DatabaseSync } = require("node:sqlite");
@@ -51,7 +62,7 @@ if [ -d "$FILES" ]; then
   cp -al "$FILES/." "$WORK/files/" 2>/dev/null || { rm -rf "$WORK/files" && mkdir "$WORK/files" && cp -a "$FILES/." "$WORK/files/"; }
   rm -rf "$WORK/files/.tmp"
 fi
-[ -r "$ENV_FILE" ] && cp "$ENV_FILE" "$WORK/biptrix.env"
+cp "$ENV_FILE" "$WORK/biptrix.env"
 
 # Restore test, on the backup itself.
 cp "$WORK/biptrix.db" "$CHECK/restored.db"

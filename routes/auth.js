@@ -72,21 +72,20 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const email = canonicalEmail(form.get('email'));
     const next = safeNext(form.get('next'), '/');
     const fail = (key, status = 401) => res.status(status).send(loginView({ t: req.t, email: email.slice(0, 254), next, error: req.t(key) }));
-    if (await auth.tooManyFailures(`ip:${req.ip}`, 40)) return fail('auth.tooMany', 429);
-    // Not an address: refused before any per-account key is stored.
-    if (!isEmail(email)) {
-      await auth.recordFailure(`ip:${req.ip}`);
-      return fail('auth.invalid');
-    }
-    if (await auth.tooManyFailures(`acct:${email}`, 8)) return fail('auth.tooMany', 429);
+    // The attempt is reserved (per IP and per address) before the password
+    // is checked; a malformed address only counts against the IP.
+    const valid = isEmail(email);
+    const stamp = await auth.takeAttempt(valid ? [[`ip:${req.ip}`, 40], [`acct:${email}`, 8]] : [[`ip:${req.ip}`, 40]]);
+    if (!stamp) return fail('auth.tooMany', 429);
+    if (!valid) return fail('auth.invalid');
     const user = await users.byEmail(email);
     const creds = user && (await users.credentials(user.id));
     const ok = creds?.password_hash && user.status === 'active' && (await auth.verifyPassword(form.get('password') || '', creds.password_hash));
     if (!ok) {
-      await auth.recordFailure(`acct:${email}`, `ip:${req.ip}`);
       if (user) await audit.log({ actor: user, action: 'auth.login_failed', resourceType: 'user', resourceId: user.id, ip: req.ip });
       return fail('auth.invalid');
     }
+    await auth.release(stamp);
     await auth.clearFailures(`acct:${email}`);
     await auth.createSession(res, req, user.id);
     if (user.mfa_enabled) return res.redirect(`/login/mfa?next=${encodeURIComponent(next)}`);
@@ -107,8 +106,7 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const email = canonicalEmail(form.get('email'));
     const next = safeNext(form.get('next'), '/');
     if (!isEmail(email)) return res.status(400).send(codeLoginView({ t: req.t, next, error: req.t('errors.invalidEmail') }));
-    if (await auth.tooManyFailures(`code-ip:${req.ip}`, 30)) return res.status(429).send(codeLoginView({ t: req.t, email, next, error: req.t('auth.tooMany') }));
-    await auth.recordFailure(`code-ip:${req.ip}`);
+    if (!(await auth.takeAttempt([[`code-ip:${req.ip}`, 30]]))) return res.status(429).send(codeLoginView({ t: req.t, email, next, error: req.t('auth.tooMany') }));
     const user = await users.byEmail(email);
     if (user?.status === 'active') {
       try {
@@ -126,20 +124,17 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const email = canonicalEmail(form.get('email'));
     const next = safeNext(form.get('next'), '/');
     const fail = (key, status = 401) => res.status(status).send(codeLoginView({ t: req.t, email: email.slice(0, 254), next, step: 'code', error: req.t(key) }));
-    // Per address and per IP, both checked before anything is written; a
-    // malformed address stores nothing.
-    if (await auth.tooManyFailures(`code-verify-ip:${req.ip}`, 30)) return fail('auth.tooMany', 429);
-    if (!isEmail(email)) {
-      await auth.recordFailure(`code-verify-ip:${req.ip}`);
-      return fail('auth.badCode');
-    }
-    if (await auth.tooManyFailures(`acct:${email}`, 8)) return fail('auth.tooMany', 429);
-    const user = await users.byEmail(email);
+    // Per address and per IP, reserved before the code is checked; a
+    // malformed address only counts against the IP. Every refusal reads the
+    // same (wrong, expired, locked, unknown address): the answer does not
+    // tell whether the account exists.
+    const valid = isEmail(email);
+    const stamp = await auth.takeAttempt(valid ? [[`code-verify-ip:${req.ip}`, 30], [`acct:${email}`, 8]] : [[`code-verify-ip:${req.ip}`, 30]]);
+    if (!stamp) return fail('auth.tooMany', 429);
+    const user = valid && (await users.byEmail(email));
     const result = user?.status === 'active' ? await loginCodes.verify(user.id, form.get('code')) : 'invalid';
-    if (result !== 'ok') {
-      await auth.recordFailure(`acct:${email}`, `code-verify-ip:${req.ip}`);
-      return fail(result === 'expired' ? 'guest.otpExpired' : result === 'locked' ? 'guest.otpLocked' : 'auth.badCode');
-    }
+    if (result !== 'ok') return fail('auth.codeRejected');
+    await auth.release(stamp);
     await auth.clearFailures(`acct:${email}`);
     await auth.createSession(res, req, user.id);
     await audit.log({ actor: user, action: 'auth.login_code', resourceType: 'user', resourceId: user.id, ip: req.ip });
@@ -159,14 +154,12 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const form = await readForm(req);
     const next = safeNext(form.get('next'), '/');
     const key = `mfa:${user.id}`;
-    if (await auth.tooManyFailures(key, 5)) {
+    const stamp = await auth.takeAttempt([[key, 5]]);
+    if (!stamp) {
       await auth.destroySession(req, res);
       return res.redirect('/login?notice=mfaLocked');
     }
-    if (!(await auth.checkTotp(user.id, form.get('code')))) {
-      await auth.recordFailure(key);
-      return res.status(401).send(mfaLoginView({ t: req.t, next, error: req.t('auth.badCode') }));
-    }
+    if (!(await auth.checkTotp(user.id, form.get('code')))) return res.status(401).send(mfaLoginView({ t: req.t, next, error: req.t('auth.badCode') }));
     await auth.clearFailures(key);
     await auth.markMfa(req);
     res.redirect(next);
@@ -183,8 +176,7 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
 
   router.post('/forgot', async (req, res) => {
     const email = canonicalEmail((await readForm(req)).get('email'));
-    if (await auth.tooManyFailures(`forgot:${req.ip}`, 10)) return res.status(429).send(forgotView({ t: req.t, error: req.t('auth.tooMany') }));
-    await auth.recordFailure(`forgot:${req.ip}`);
+    if (!(await auth.takeAttempt([[`forgot:${req.ip}`, 10]]))) return res.status(429).send(forgotView({ t: req.t, error: req.t('auth.tooMany') }));
     const user = await users.byEmail(email);
     // Same answer whether or not the address has an account.
     if (user?.status === 'active') {
@@ -321,16 +313,27 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     try {
       const creds = await users.credentials(req.user.id);
       const password = auth.validatePassword(form.get('password'));
+      // Guesses of the current password are limited like sign-in.
+      const stamp = await auth.takeAttempt([[`pw-change:${req.user.id}`, 5]]);
+      if (!stamp) return renderAccount(req, res, { error: req.t('auth.tooMany'), codeSent: true, status: 429 });
       if (creds.password_hash) {
         if (!(await auth.verifyPassword(form.get('current') || '', creds.password_hash))) return renderAccount(req, res, { error: req.t('account.wrongPassword'), status: 400 });
-        await users.setPasswordHash(req.user.id, await auth.hashPassword(password));
       } else {
         const result = await loginCodes.verify(req.user.id, form.get('code'));
         if (result !== 'ok') return renderAccount(req, res, { error: req.t(result === 'expired' ? 'guest.otpExpired' : result === 'locked' ? 'guest.otpLocked' : 'auth.badCode'), codeSent: result === 'invalid', status: 400 });
-        // Conditional: never overwrites a password set meanwhile.
-        const [set] = await db.batch([['UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND password_hash IS NULL', [await auth.hashPassword(password), nowIso(), req.user.id]]]);
-        if (!set.changes) return renderAccount(req, res, { error: req.t('account.wrongPassword'), status: 409 });
       }
+      await auth.release(stamp);
+      // The write only lands if nothing changed since the check: the same
+      // password as verified (a reset finished meanwhile wins) and this
+      // session still valid (a reset or "sign out others" revoked it).
+      const [set] = await db.batch([
+        [
+          `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND password_hash IS ?
+             AND EXISTS (SELECT 1 FROM sessions WHERE id_hash = ? AND user_id = ? AND expires_at > ?)`,
+          [await auth.hashPassword(password), nowIso(), req.user.id, creds.password_hash, req.session.id_hash, req.user.id, nowIso()],
+        ],
+      ]);
+      if (!set.changes) return renderAccount(req, res, { error: req.t('account.passwordChangedMeanwhile'), status: 409 });
       await auth.destroyUserSessions(req.user.id, req.session.id_hash);
       await audit.log({ actor: req.user, action: 'auth.password_change', resourceType: 'user', resourceId: req.user.id, ip: req.ip });
       res.redirect('/account?notice=passwordChanged');
@@ -372,12 +375,11 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     if (!(await users.credentials(req.user.id))?.password_hash) return renderAccount(req, res, { error: req.t('account.mfaNeedsPassword'), status: 400 });
     const form = await readForm(req);
     const secret = pendingSecret(req);
-    const key = `mfa-enroll:${req.user.id}`;
-    if (await auth.tooManyFailures(key, 5)) return renderAccount(req, res, { error: req.t('auth.tooMany'), status: 429 });
-    if (!(await passwordOk(req, form.get('password')))) {
-      await auth.recordFailure(key);
-      return renderAccount(req, res, { error: req.t('account.wrongPassword'), mfaSetup: setupFor(req, secret), status: 400 });
-    }
+    const stamp = await auth.takeAttempt([[`mfa-enroll:${req.user.id}`, 5]]);
+    if (!stamp) return renderAccount(req, res, { error: req.t('auth.tooMany'), status: 429 });
+    if (!(await passwordOk(req, form.get('password')))) return renderAccount(req, res, { error: req.t('account.wrongPassword'), mfaSetup: setupFor(req, secret), status: 400 });
+    // (A wrong authenticator code is a typo, not a password guess.)
+    await auth.release(stamp);
     if (!secret || !verifyTotp(secret, form.get('code'))) {
       return renderAccount(req, res, { error: req.t('auth.badCode'), mfaSetup: setupFor(req, secret), status: 400 });
     }
@@ -393,12 +395,12 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
 
   router.post('/account/mfa/disable', requireUser, async (req, res) => {
     const form = await readForm(req);
-    const key = `mfa-disable:${req.user.id}`;
-    if (await auth.tooManyFailures(key, 5)) return renderAccount(req, res, { error: req.t('auth.tooMany'), status: 429 });
+    const stamp = await auth.takeAttempt([[`mfa-disable:${req.user.id}`, 5]]);
+    if (!stamp) return renderAccount(req, res, { error: req.t('auth.tooMany'), status: 429 });
     if (!(await passwordOk(req, form.get('password'))) || !(await auth.checkTotp(req.user.id, form.get('code')))) {
-      await auth.recordFailure(key);
       return renderAccount(req, res, { error: req.t('account.mfaDisableFailed'), status: 400 });
     }
+    await auth.release(stamp);
     await users.setTotpSecret(req.user.id, null);
     await audit.log({ actor: req.user, action: 'auth.mfa_disable', resourceType: 'user', resourceId: req.user.id, ip: req.ip });
     res.redirect('/account?notice=mfaDisabled');

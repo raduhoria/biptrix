@@ -164,6 +164,14 @@ describe('collaborators: roles, policies, expiry', () => {
     assert.equal((await app.db.get('SELECT state FROM meeting_participants WHERE meeting_id = ? AND user_id = ?', [meetingId, user.id])).state, 'removed');
     void ana;
   });
+  test('an expired collaborator gets no mention e-mails before maintenance', async () => {
+    const { user } = await collaborator('mail@partner.com');
+    await app.db.run('UPDATE memberships SET access_expires_at = ? WHERE org_id = ? AND user_id = ?', [past(), org.id, user.id]);
+    const before = app.mailer.sent.filter((m) => m.to === 'mail@partner.com').length;
+    await anaClient.post(`${API()}/conversations/${shared.id}/messages`, { json: { client_message_id: newId(), body: `<@${user.id}> secret plan` } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(app.mailer.sent.filter((m) => m.to === 'mail@partner.com').length, before);
+  });
 });
 
 describe('sign-in hardening', () => {
@@ -243,6 +251,63 @@ describe('sign-in hardening', () => {
     const c = client(app.base);
     const res = await c.post('/login', { form: { email: 'ana@a.ro', password: 'x' }, headers: { Origin: app.base.replace('http:', 'https:') } });
     assert.equal(res.status, 403);
+  });
+  test('password guesses: the limit holds under concurrency and on the change form', async () => {
+    await app.db.run('DELETE FROM auth_failures');
+    await app.user(org, { email: 'brute@a.ro' });
+    const statuses = await Promise.all(Array.from({ length: 12 }, () => client(app.base).post('/login', { form: { email: 'brute@a.ro', password: 'gresita-123' } })));
+    assert.equal(statuses.filter((r) => r.status === 401).length, 8, 'exactly 8 checked');
+    assert.equal(statuses.filter((r) => r.status === 429).length, 4);
+
+    await app.db.run('DELETE FROM auth_failures');
+    const c = client(app.base);
+    await c.login('brute@a.ro');
+    const codes = [];
+    for (let i = 0; i < 7; i++) codes.push((await c.post('/account/password', { form: { current: `gresita-${i}`, password: 'Parola-noua-123' } })).status);
+    assert.deepEqual(codes, [400, 400, 400, 400, 400, 429, 429]);
+  });
+
+  test('a password change authorized before a reset cannot overwrite it', async () => {
+    await app.db.run('DELETE FROM auth_failures');
+    await app.user(org, { email: 'race@a.ro' });
+    const c = client(app.base);
+    await c.login('race@a.ro');
+    const { auth } = app.services;
+    const realHash = auth.hashPassword;
+    let resume;
+    const paused = new Promise((r) => (resume = r));
+    let started;
+    const hashing = new Promise((r) => (started = r));
+    auth.hashPassword = async (pw) => {
+      if (pw === 'Parola-veche-schimbata') {
+        started();
+        await paused;
+      }
+      return realHash(pw);
+    };
+    try {
+      const change = c.post('/account/password', { form: { current: 'Parola12345', password: 'Parola-veche-schimbata' } });
+      await hashing;
+      // Meanwhile the owner resets the password by e-mail.
+      await client(app.base).post('/forgot', { form: { email: 'race@a.ro' } });
+      const token = lastMailTo(app, 'race@a.ro').text.match(/\/reset\/([A-Za-z0-9_-]+)/)[1];
+      assert.equal((await client(app.base).post(`/reset/${token}`, { form: { password: 'Parola-din-reset' } })).status, 303);
+      resume();
+      assert.equal((await change).status, 409);
+    } finally {
+      auth.hashPassword = realHash;
+    }
+    await client(app.base).login('race@a.ro', 'Parola-din-reset');
+  });
+
+  test('code verification answers the same for an account without a code and an unknown address', async () => {
+    await app.db.run('DELETE FROM auth_failures');
+    await app.db.run('DELETE FROM login_codes');
+    const text = async (email) => {
+      const res = await client(app.base).post('/login/code/verify', { form: { email, code: '123456' } });
+      return `${res.status} ${res.text.replaceAll(email, 'E')}`;
+    };
+    assert.equal(await text('ana@a.ro'), await text('nimeni@a.ro'));
   });
 });
 
