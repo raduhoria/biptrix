@@ -234,6 +234,8 @@ export default {
     invite_ttl_hours: 'Valabilitate invitație (ore)',
     guest_otp_required: 'Invitatul confirmă adresa cu un cod OTP primit pe e-mail (recomandat)',
     guest_lobby_required: 'Invitații așteaptă în lobby până îi acceptă gazda',
+    media_sfu_allowed: 'Apelurile cu peste 6 persoane pot trece prin Cloudflare SFU',
+    media_sfu_help: 'Până la 6 persoane, apelurile sunt mereu peer-to-peer, criptate între participanți. Peste, trec fără întrerupere pe Cloudflare SFU, care poate vedea tehnic audio/video. Dezactivat, apelurile rămân criptate între participanți și sunt limitate la 6 persoane.',
     guest_screen_share: 'Invitații externi pot partaja ecranul',
     domain_allowlist: 'Domenii permise (gol = oricare)',
     domain_denylist: 'Domenii blocate',

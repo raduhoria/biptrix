@@ -135,7 +135,7 @@ export function policiesView({ t, req, policy, notice, error }) {
     t('admin.policies'),
     `${alerts({ notice, error })}
     <form method="post" action="/o/${escapeHtml(org.slug)}/admin/policies">
-      <input type="hidden" name="_bools" value="external_meetings_enabled,guest_otp_required,guest_lobby_required,guest_screen_share,email_notifications,collaborators_enabled">
+      <input type="hidden" name="_bools" value="external_meetings_enabled,guest_otp_required,guest_lobby_required,guest_screen_share,email_notifications,collaborators_enabled,media_sfu_allowed">
       <section class="card mb-4"><div class="card-body">
         <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('policy.externalTitle'))}</h2>
         ${check('external_meetings_enabled')}
@@ -180,6 +180,7 @@ export function policiesView({ t, req, policy, notice, error }) {
       <section class="card mb-4"><div class="card-body">
         <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('policy.meetingsTitle'))}</h2>
         <div class="row g-3">${num('max_meeting_minutes', 5, 1440)}${num('max_participants', 2, 1000)}</div>
+        <div class="mt-3">${check('media_sfu_allowed')}<div class="form-text mt-n1">${escapeHtml(t('policy.media_sfu_help'))}</div></div>
       </div></section>
       <section class="card mb-4"><div class="card-body">
         <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('policy.dataTitle'))}</h2>

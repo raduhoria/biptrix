@@ -261,7 +261,10 @@ function onServer(type, d) {
       return onJoined(d);
     case 'peer.tracks': {
       const p = state.peers.get(d.id);
-      if (p) p.info.tracks = d.tracks;
+      if (p) {
+        p.info.tracks = d.tracks;
+        meshDoneFor(p);
+      }
       return sfuSync();
     }
     case 'peer.joined':
@@ -297,6 +300,8 @@ function onServer(type, d) {
     case 'role':
       state.canManage = d.can_manage;
       return renderControls();
+    case 'topology':
+      return moveTo(d.topology);
     case 'signal':
       return onSignal(d.from, d.data);
     case 'lobby.update':
@@ -503,14 +508,14 @@ async function sfuStart() {
     const target = sfu.midMap.get(e.transceiver.mid);
     const peer = target && state.peers.get(target.pid);
     if (!peer) return;
-    const stream = target.slot === 'screen' ? peer.screen : peer.stream;
-    for (const tr of stream.getTracks()) if (tr.kind === e.track.kind) stream.removeTrack(tr);
-    stream.addTrack(e.track);
-    peer.tile?.classList.remove('connecting');
-    e.track.onunmute = () => renderTile(peer);
-    e.track.onmute = () => renderTile(peer);
-    renderTile(peer);
-    if (e.track.kind === 'audio') watchLevel(peer);
+    // Back on peer-to-peer with a working connection: that one is shown.
+    if (state.topology === 'mesh' && peer.pc?.connectionState === 'connected') return;
+    whenLive(e.track, () => {
+      if (state.sfu !== sfu || (state.topology === 'mesh' && peer.pc?.connectionState === 'connected')) return;
+      showTrack(peer, target.slot, e.track);
+      peer.sfuGot.add(target.slot);
+      meshDoneFor(peer);
+    });
   };
   pc.onconnectionstatechange = async () => {
     if (pc.connectionState === 'connected' && !sfu.connected) {
@@ -607,10 +612,11 @@ function sfuDrop() {
 
 function addPeer(info, initiator = false) {
   if (state.peers.has(info.id)) removePeer(info.id);
-  const peer = { info, initiator, pc: null, pendingIce: [], stream: new MediaStream(), screen: new MediaStream(), tile: null, screenTile: null, level: 0 };
+  const peer = { info, initiator, pc: null, pendingIce: [], stream: new MediaStream(), screen: new MediaStream(), tile: null, screenTile: null, level: 0, meshTracks: {}, sfuGot: new Set() };
   state.peers.set(info.id, peer);
   createTile(peer);
   if (initiator) startCall(peer);
+  capAll();
 }
 
 function createPc(peer) {
@@ -618,17 +624,24 @@ function createPc(peer) {
   peer.pc = pc;
   pc.onicecandidate = (e) => e.candidate && send('signal', { to: peer.info.id, data: { candidate: e.candidate } });
   pc.ontrack = (e) => {
-    const slot = pc.getTransceivers().indexOf(e.transceiver);
-    const target = slot === SLOT.screen ? peer.screen : peer.stream;
-    for (const tr of target.getTracks()) if (tr.kind === e.track.kind) target.removeTrack(tr);
-    target.addTrack(e.track);
-    e.track.onunmute = () => renderTile(peer);
-    e.track.onmute = () => renderTile(peer);
-    renderTile(peer);
-    if (e.track.kind === 'audio') watchLevel(peer);
+    const slot = SLOT_NAMES[pc.getTransceivers().indexOf(e.transceiver)];
+    peer.meshTracks[slot] = e.track;
+    // While the SFU still carries this peer, switch only once this
+    // connection is up (make before break).
+    if (state.topology === 'mesh' && (!state.sfu || pc.connectionState === 'connected')) showTrack(peer, slot, e.track);
   };
   pc.onconnectionstatechange = () => {
-    peer.tile?.classList.toggle('connecting', !['connected', 'completed'].includes(pc.connectionState));
+    if (state.topology === 'mesh') peer.tile?.classList.toggle('connecting', !['connected', 'completed'].includes(pc.connectionState));
+    if (pc.connectionState === 'connected' && state.topology === 'mesh') {
+      for (const [slot, track] of Object.entries(peer.meshTracks)) {
+        whenLive(track, () => {
+          if (peer.pc !== pc || state.topology !== 'mesh') return;
+          showTrack(peer, slot, track);
+          sfuDoneCheck();
+        });
+      }
+      sfuDoneCheck();
+    }
     // Only the side that offered restarts ICE, so restarts never collide.
     if (pc.connectionState === 'failed' && peer.initiator) {
       pc.restartIce();
@@ -655,7 +668,42 @@ async function offer(peer, options = {}) {
   const sdp = await peer.pc.createOffer(options);
   await peer.pc.setLocalDescription(sdp);
   send('signal', { to: peer.info.id, data: { sdp: peer.pc.localDescription } });
+  capPeer(peer);
 }
+
+// ------------------------------------------------------------- mesh quality
+// Peer-to-peer, every participant sends its picture once per other person,
+// so the quality of each copy goes down as the call grows: the total upload
+// stays around 2 Mbps (fine on a phone or weak Wi-Fi) instead of growing to
+// 10+ Mbps at six people. Applied with setParameters, no renegotiation;
+// re-applied whenever someone joins or leaves. (On the SFU each picture is
+// sent once and the SFU adapts it per receiver.)
+function meshCaps(others) {
+  if (others <= 1) return { camera: { maxBitrate: 1_500_000, scaleResolutionDownBy: 1 }, screen: { maxBitrate: 2_500_000 } };
+  if (others <= 3) return { camera: { maxBitrate: 800_000, scaleResolutionDownBy: 4 / 3 }, screen: { maxBitrate: 1_500_000 } };
+  return { camera: { maxBitrate: 400_000, scaleResolutionDownBy: 2 }, screen: { maxBitrate: 1_000_000 } };
+}
+
+async function capSender(sender, cap) {
+  const params = sender.getParameters();
+  if (!params.encodings?.length) return; // not negotiated yet; applied after
+  const enc = params.encodings[0];
+  if (enc.maxBitrate === cap.maxBitrate && (enc.scaleResolutionDownBy || 1) === (cap.scaleResolutionDownBy || 1)) return;
+  Object.assign(enc, cap);
+  await sender.setParameters(params).catch(() => {});
+}
+
+function capPeer(peer) {
+  if (!peer.pc) return;
+  const caps = meshCaps(state.peers.size);
+  const tr = peer.pc.getTransceivers();
+  if (tr[SLOT.camera]) capSender(tr[SLOT.camera].sender, caps.camera);
+  if (tr[SLOT.screen]) capSender(tr[SLOT.screen].sender, caps.screen);
+}
+
+const capAll = () => {
+  for (const peer of state.peers.values()) capPeer(peer);
+};
 
 async function onSignal(from, data) {
   const peer = state.peers.get(from);
@@ -672,6 +720,7 @@ async function onSignal(from, data) {
         });
         await peer.pc.setLocalDescription(await peer.pc.createAnswer());
         send('signal', { to: from, data: { sdp: peer.pc.localDescription } });
+        capPeer(peer);
       } else if (peer.pc) {
         await peer.pc.setRemoteDescription(data.sdp);
       }
@@ -692,15 +741,138 @@ function removePeer(id) {
   peer.tile?.remove();
   peer.screenTile?.remove();
   state.peers.delete(id);
+  capAll();
   if (state.sfu) sfuDrop();
   layout();
 }
 
 function teardownPeers() {
+  clearTimeout(moveTimer);
   const sfu = state.sfu;
   state.sfu = null;
   sfu?.pc.close();
   for (const id of [...state.peers.keys()]) removePeer(id);
+}
+
+// ---------------------------------------------------------- topology moves
+// The server moves a call between peer-to-peer and the SFU (core/
+// meeting-rooms.js) and says so with `topology`. The new path is built
+// while the old one still plays; a peer's tile switches to the new path
+// track by track as it becomes live, and the old path is closed when the
+// new one carries everything (or after MOVE_TIMEOUT_MS). The room socket
+// stays connected throughout.
+const SLOT_NAMES = ['audio', 'camera', 'screen'];
+const MOVE_TIMEOUT_MS = 12_000;
+let moveTimer = null;
+
+// A new track is only shown once media flows on it (a track starts muted
+// until its first packets), so a move never shows a frozen picture.
+function whenLive(track, fn) {
+  if (!track.muted) return fn();
+  track.addEventListener('unmute', fn, { once: true });
+}
+
+// Calls fn once the element has painted a frame (or after 3 s).
+function onFrame(video, fn) {
+  let done = false;
+  const once = () => !done && ((done = true), fn());
+  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(once);
+  else video.addEventListener('playing', once, { once: true });
+  setTimeout(once, 3000);
+}
+
+function showTrack(peer, slot, track) {
+  const target = slot === 'screen' ? peer.screen : peer.stream;
+  if (target.getTracks().includes(track)) return;
+  // Replacing the picture of a tile that is playing: a video element whose
+  // track changes restarts its decoder (about a second of frozen picture).
+  // The new track plays first in a cover element over the tile; the tile's
+  // own element switches underneath, and the cover goes once it paints.
+  const current = target.getVideoTracks()[0];
+  const main = slot !== 'screen' && peer.tile && $('video', peer.tile);
+  if (track.kind === 'video' && main && current?.readyState === 'live' && !current.muted) {
+    $('.tile-cover', peer.tile)?.remove();
+    const cover = Object.assign(document.createElement('video'), { className: 'tile-cover', muted: true, autoplay: true, playsInline: true });
+    cover.srcObject = new MediaStream([track]);
+    peer.tile.append(cover);
+    onFrame(cover, () => {
+      target.removeTrack(current);
+      target.addTrack(track);
+      track.onunmute = () => renderTile(peer);
+      track.onmute = () => renderTile(peer);
+      renderTile(peer);
+      onFrame(main, () => cover.remove());
+    });
+    return;
+  }
+  for (const tr of target.getTracks()) if (tr.kind === track.kind) target.removeTrack(tr);
+  target.addTrack(track);
+  track.onunmute = () => renderTile(peer);
+  track.onmute = () => renderTile(peer);
+  peer.tile?.classList.remove('connecting');
+  renderTile(peer);
+  if (track.kind === 'audio') watchLevel(peer);
+}
+
+function closeMesh(peer) {
+  peer.pc?.close();
+  peer.pc = null;
+  peer.meshTracks = {};
+  peer.pendingIce = [];
+}
+
+// On the SFU: a peer's direct connection goes once the SFU brings all it
+// publishes.
+function meshDoneFor(peer) {
+  if (state.topology !== 'sfu' || !peer.pc) return;
+  const published = Object.keys(peer.info.tracks || {}).filter((slot) => slot !== 'screen');
+  if (published.length && published.every((slot) => peer.sfuGot.has(slot))) closeMesh(peer);
+}
+
+// Back on peer-to-peer: the SFU session goes once every peer is connected
+// directly and their sound (and picture, if their camera is on) arrives
+// that way.
+function sfuDoneCheck() {
+  if (state.topology !== 'mesh' || !state.sfu) return;
+  const live = (track) => track && !track.muted;
+  const direct = (p) => p.pc?.connectionState === 'connected' && live(p.meshTracks.audio) && (p.info.media?.video === false || live(p.meshTracks.camera));
+  if ([...state.peers.values()].every(direct)) leaveSfu();
+}
+
+function leaveSfu() {
+  const sfu = state.sfu;
+  if (!sfu) return;
+  state.sfu = null;
+  clearTimeout(moveTimer);
+  request('sfu.leave', {}).catch(() => {});
+  sfu.pc.close();
+  for (const peer of state.peers.values()) {
+    peer.sfuGot.clear();
+    for (const [slot, track] of Object.entries(peer.meshTracks)) whenLive(track, () => peer.meshTracks[slot] === track && showTrack(peer, slot, track));
+  }
+}
+
+function moveTo(topology) {
+  if (!state.joined || state.topology === topology) return;
+  state.topology = topology;
+  clearTimeout(moveTimer);
+  if (topology === 'sfu') {
+    for (const peer of state.peers.values()) peer.sfuGot.clear();
+    if (!state.sfu) sfuStart();
+    // Whatever has not moved by then is closed anyway.
+    moveTimer = setTimeout(() => {
+      for (const peer of state.peers.values()) if (state.topology === 'sfu') closeMesh(peer);
+    }, MOVE_TIMEOUT_MS);
+  } else {
+    // Each pair connects directly; the lower id offers, so no two offers cross.
+    for (const peer of state.peers.values()) {
+      if (peer.pc) continue;
+      peer.initiator = state.self.id < peer.info.id;
+      if (peer.initiator) startCall(peer);
+    }
+    moveTimer = setTimeout(() => state.topology === 'mesh' && leaveSfu(), MOVE_TIMEOUT_MS);
+    sfuDoneCheck();
+  }
 }
 
 // Track changes reach every peer without renegotiation.
@@ -898,8 +1070,8 @@ async function toggleScreen() {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
     state.local.screen = stream.getVideoTracks()[0];
     state.local.screen.onended = stopScreen;
+    pushTrack(SLOT.screen);
     if (state.sfu) sfuScreenOn();
-    else pushTrack(SLOT.screen);
     renderControls();
     renderLocalTile();
     announceMedia();
@@ -911,8 +1083,8 @@ async function toggleScreen() {
 function stopScreen() {
   if (!state.local.screen) return;
   stopTrack('screen');
+  pushTrack(SLOT.screen);
   if (state.sfu) sfuScreenOff();
-  else pushTrack(SLOT.screen);
   renderControls();
   renderLocalTile();
   announceMedia();

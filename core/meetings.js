@@ -54,6 +54,7 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
       guest_otp_required: policy.guest_otp_required,
       guest_lobby_required: policy.guest_lobby_required,
       guest_screen_share: policy.guest_screen_share,
+      media_sfu_allowed: policy.media_sfu_allowed,
       max_participants: policy.max_participants,
     };
     const tokens = [];
