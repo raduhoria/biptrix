@@ -154,10 +154,10 @@ const ROLE = (t, role) => (role ? t(`roles.${role}`) : '');
 export const orgInviteEmail = ({ t, org, inviter, url, role = '' }) =>
   frame({
     t,
-    preheader: t('email.orgInviteIntro', { inviter, org }),
+    preheader: t('email.orgInviteIntro', { inviter, org, brand: brand.name }),
     eyebrow: t('email.eyebrow.invite'),
     title: t('email.orgInviteTitle', { org }),
-    intro: escapeHtml(t('email.orgInviteIntro', { inviter, org })),
+    intro: escapeHtml(t('email.orgInviteIntro', { inviter, org, brand: brand.name })),
     details: [
       [t('email.labels.org'), org],
       [t('email.labels.invitedBy'), inviter],

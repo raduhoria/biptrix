@@ -1,4 +1,4 @@
-import { createTranslator, translateError } from '../core/i18n.js';
+import { INTL_LOCALE, createTranslator, translateError } from '../core/i18n.js';
 import { readForm, readJson } from '../core/router.js';
 import { appError, newId } from '../core/util.js';
 import { meetingInviteEmail, memberMeetingEmail, otpEmail } from '../views/emails.js';
@@ -12,7 +12,7 @@ const GUEST_COOKIE = 'gsid';
 // session) and the guest room at /meet/:id.
 export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, rooms, mailer, config, db, users }) {
   const member = [auth.requireUser, orgs.requireOrg];
-  const whenText = (t, m) => new Date(m.scheduled_at).toLocaleString(t.locale === 'ro' ? 'ro-RO' : 'en-GB', { dateStyle: 'full', timeStyle: 'short', timeZone: 'Europe/Bucharest' }) + ' (Europe/Bucharest)';
+  const whenText = (t, m) => new Date(m.scheduled_at).toLocaleString(INTL_LOCALE[t.locale] || 'en-GB', { dateStyle: 'full', timeStyle: 'short', timeZone: 'Europe/Bucharest' }) + ' (Europe/Bucharest)';
 
   function sendGuestInvites(t, org, meeting, inviter, tokens) {
     for (const g of tokens) {
@@ -27,7 +27,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     for (const id of userIds) {
       const u = await users.byId(id);
       if (!u) continue;
-      const t = createTranslator(u.locale || 'ro');
+      const t = createTranslator(u.locale || 'en');
       mailer.queue({ to: u.email, ...memberMeetingEmail({ t, org: org.name, inviter: inviter.name, title: meeting.title, when: whenText(t, meeting), url: `${config.appUrl}/o/${org.slug}/meet/${meeting.id}` }) });
     }
   }

@@ -27,7 +27,7 @@ export function createNotifier({ db, mailer, policies, config, isOnline }) {
       );
       if (!row || row.muted) continue;
       last.set(key, Date.now());
-      const t = createTranslator(row.locale || 'ro');
+      const t = createTranslator(row.locale || 'en');
       const preview = String(message.body).replace(/<@[A-Za-z0-9_-]+>/g, '@…').slice(0, 200);
       const name = conversation.type === 'dm' ? t('email.directMessage') : conversation.name || t('email.group');
       mailer.queue({

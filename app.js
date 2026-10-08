@@ -73,7 +73,7 @@ export async function createApp(config, { quiet = false } = {}) {
   function onError(err, req, res) {
     const status = err.status || (err.code === 'db_unavailable' ? 503 : 500);
     if (status >= 500 && err.code !== 'db_unavailable') console.error(`${req.method} ${req.url}:`, err);
-    const t = req.t || createTranslator('ro');
+    const t = req.t || createTranslator('en');
     const message = err.expose || err.code === 'db_unavailable' ? translateError(t, err) : t('errors.internal');
     if (req.path?.startsWith('/api/')) return res.status(status).json({ error: { code: err.code || 'internal', message, details: err.expose ? err.details : undefined } });
     if (status === 401) return res.redirect(`/login?next=${encodeURIComponent(req.url)}`);
@@ -106,7 +106,7 @@ export async function createApp(config, { quiet = false } = {}) {
     req.secure = config.cookieSecure || isSecure(req, config.trustProxy);
     securityHeaders(res, req.secure);
     req.cookies = parseCookies(req.headers.cookie);
-    req.t = createTranslator(resolveLocale(req.cookies, req.headers['accept-language']));
+    req.t = createTranslator(resolveLocale(req.cookies));
     if (!['GET', 'HEAD'].includes(req.method) && !sameOrigin(req, config.appUrl)) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
       return res.end('Cross-site request blocked');

@@ -1,11 +1,12 @@
-import ro from '../locales/ro.js';
 import en from '../locales/en.js';
+import ro from '../locales/ro.js';
+import es from '../locales/es.js';
 
 // UI translations, nested objects looked up by dot path ("chat.send"). A key
-// missing in en.js falls back to Romanian, then to the key itself.
-const DICTIONARIES = { ro, en };
+// missing in ro.js or es.js falls back to English, then to the key itself.
+const DICTIONARIES = { en, ro, es };
 export const LOCALES = Object.keys(DICTIONARIES);
-export const DEFAULT_LOCALE = 'ro';
+export const DEFAULT_LOCALE = 'en';
 export const LOCALE_COOKIE = 'lang';
 
 export function normalizeLocale(value) {
@@ -13,16 +14,15 @@ export function normalizeLocale(value) {
   return LOCALES.includes(code) ? code : null;
 }
 
-// Explicit cookie choice first, then the browser's Accept-Language order.
-export function resolveLocale(cookies, acceptLanguage = '') {
-  const fromCookie = normalizeLocale(cookies?.[LOCALE_COOKIE]);
-  if (fromCookie) return fromCookie;
-  for (const part of String(acceptLanguage).split(',')) {
-    const code = normalizeLocale(part.trim());
-    if (code) return code;
-  }
-  return DEFAULT_LOCALE;
+// The language chosen in the selector (cookie) first; app.js then applies the
+// signed-in user's saved language; otherwise English. The browser's
+// Accept-Language is deliberately not used: English is the default.
+export function resolveLocale(cookies) {
+  return normalizeLocale(cookies?.[LOCALE_COOKIE]) || DEFAULT_LOCALE;
 }
+
+// Intl locale for dates and times.
+export const INTL_LOCALE = { en: 'en-GB', ro: 'ro-RO', es: 'es-ES' };
 
 const lookup = (dict, key) => key.split('.').reduce((node, part) => (node == null ? undefined : node[part]), dict);
 
