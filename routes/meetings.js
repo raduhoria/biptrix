@@ -10,7 +10,7 @@ const GUEST_COOKIE = 'gsid';
 // Meetings (spec §8–9): member pages and API under /o/:org, the external
 // guest flow under /join/:token (invitation link → e-mail OTP → guest
 // session) and the guest room at /meet/:id.
-export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, rooms, mailer, config, db, users }) {
+export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, rooms, calls, mailer, config, db, users }) {
   const member = [auth.requireUser, orgs.requireOrg];
   const whenText = (t, m) => new Date(m.scheduled_at).toLocaleString(INTL_LOCALE[t.locale] || 'en-GB', { dateStyle: 'full', timeStyle: 'short', timeZone: 'Europe/Bucharest' }) + ' (Europe/Bucharest)';
 
@@ -46,8 +46,9 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     res.json({ meetings: await Promise.all(list.map((m) => meetingJson(m, req))) });
   });
 
-  // Create: scheduled or instant; from a conversation ("call") the meeting
-  // is linked to it and announced there as a meeting card.
+  // Create: scheduled or instant; from a conversation the meeting is linked
+  // to it and announced there as a meeting card. `call: audio|video` (the
+  // call buttons) also rings the other members of a DM or group.
   router.post('/api/o/:org/meetings', ...member, orgs.requirePermission('meetings.create'), async (req, res) => {
     const body = await readJson(req);
     let conversation = null;
@@ -68,16 +69,31 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     );
     sendGuestInvites(req.t, req.org, meeting, req.user, guestTokens);
     if (body.notify_members !== false) await sendMemberInvites(req.org, meeting, req.user, (Array.isArray(body.user_ids) ? body.user_ids : []).filter((id) => id !== req.user.id));
+    const callKind = conversation && ['audio', 'video'].includes(body.call) ? body.call : null;
+    let ringing = 0;
     if (conversation) {
       await chat.send(req.org, req.user, {
         conversationId: conversation.id,
         clientMessageId: `mtg_${newId()}`,
         kind: 'meeting',
         body: meeting.title,
-        meta: { meeting_id: meeting.id, title: meeting.title, scheduled_at: meeting.scheduled_at, state: meeting.state },
+        meta: { meeting_id: meeting.id, title: meeting.title, scheduled_at: meeting.scheduled_at, state: meeting.state, call: callKind },
       });
+      if (callKind) ringing = (await calls.ring(req.org, req.user, conversation, meeting, callKind)).length;
     }
-    res.json({ meeting: await meetingJson(meeting, req) });
+    res.json({ meeting: await meetingJson(await meetings.byId(meeting.id), req), ringing });
+  });
+
+  // A callee's answer from the incoming-call screen: every device of theirs
+  // stops ringing; declining is shown to the caller. (Accepting also
+  // happens by simply joining the room.)
+  router.post('/api/o/:org/meetings/:id/ring', ...member, async (req, res) => {
+    const meeting = await meetings.requireMeeting(req.org, req.params.id);
+    if (!meeting.conversation_id) throw appError('not_found', 'Not a call');
+    await chat.requireConversation(req.org, req.user, meeting.conversation_id);
+    const answer = (await readJson(req)).answer === 'accept' ? 'accept' : 'decline';
+    await calls.respond(meeting, req.user, answer);
+    res.json({ ok: true });
   });
 
   async function managed(req) {
@@ -128,7 +144,9 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     const meeting = await meetings.requireMeeting(req.org, req.params.id);
     const back = `/o/${req.org.slug}${meeting.conversation_id ? `/c/${meeting.conversation_id}` : '/meetings'}`;
     if (!meetings.isOpen(meeting)) return res.status(410).send(messagePage({ t: req.t, title: meeting.title, message: req.t('errors.meetingEnded'), back }));
-    res.send(meetingRoomView({ t: req.t, meeting, org: req.org, mode: 'member', displayName: req.user.name, canInvite: await meetings.canManage(meeting, req.user, req.membership.role), backHref: back }));
+    // ?call=audio|video: straight in from a call (no pre-join screen), camera per call kind.
+    const call = ['audio', 'video'].includes(req.query.call) ? req.query.call : '';
+    res.send(meetingRoomView({ t: req.t, meeting, org: req.org, mode: 'member', displayName: req.user.name, canInvite: await meetings.canManage(meeting, req.user, req.membership.role), backHref: back, call, userId: req.user.id }));
   });
 
   // ---------------------------------------------------------- guest flow

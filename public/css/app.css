@@ -320,6 +320,25 @@
 .tile-mic .ic { color: #f87171; }
 .tile.connecting::after { content: ""; position: absolute; top: .6rem; right: .6rem; width: .6rem; height: .6rem; border-radius: 50%; background: #f59e0b; animation: pulse 1s infinite; }
 .meet-panel { width: 320px; flex-shrink: 0; margin: .3rem .8rem .3rem 0; padding: 1rem; border-radius: .9rem; background: #1a1c23; overflow-y: auto; }
+/* People / chat tabs; the chat fills the panel, newest at the bottom. */
+.meet-panel:not([hidden]) { display: flex; flex-direction: column; }
+.meet-tab { color: #cbd5e1; border-radius: .5rem; }
+.meet-tab:hover { color: #fff; background: #2a2d36; }
+.meet-panel[data-tab="people"] .meet-tab[data-tab="people"], .meet-panel[data-tab="chat"] .meet-tab[data-tab="chat"] { background: #2a2d36; color: #fff; }
+.meet-panel[data-tab="people"] .meet-chat, .meet-panel[data-tab="chat"] .meet-people { display: none; }
+.meet-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.meet-chat-list { flex: 1; overflow-y: auto; min-height: 8rem; display: flex; flex-direction: column; gap: .5rem; padding-right: .2rem; }
+.meet-msg { max-width: 92%; }
+.meet-msg.mine { align-self: flex-end; text-align: right; }
+.meet-msg-head { font-size: .72rem; opacity: .7; }
+.meet-msg-body { display: inline-block; padding: .35rem .6rem; border-radius: .7rem; background: #2a2d36; white-space: pre-wrap; word-break: break-word; text-align: left; font-size: .88rem; }
+.meet-msg.mine .meet-msg-body { background: var(--brand); color: #fff; }
+.meet-msg.pending .meet-msg-body { opacity: .6; }
+.meet-msg-body a { color: inherit; }
+.meet-chat-form { display: flex; gap: .4rem; align-items: flex-end; padding-top: .5rem; }
+.meet-chat-form textarea { resize: none; max-height: 7rem; }
+.call-banner { position: absolute; top: 3.6rem; left: 50%; transform: translateX(-50%); z-index: 20; padding: .45rem 1rem; border-radius: 2rem; background: rgba(26, 28, 35, .92); box-shadow: 0 4px 16px rgba(0, 0, 0, .35); font-size: .9rem; }
+.call-banner .ring-dot { display: inline-block; width: .55rem; height: .55rem; margin-right: .4rem; border-radius: 50%; background: #22c55e; animation: pulse 1s infinite; }
 .meet-panel .dropdown-menu { --bs-dropdown-bg: #2a2d36; --bs-dropdown-link-color: #e5e7eb; --bs-dropdown-link-hover-bg: #3a3e4a; --bs-dropdown-link-hover-color: #fff; }
 .lobby-item { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .5rem; margin-bottom: .4rem; border-radius: .6rem; background: rgba(245, 158, 11, .12); }
 .meet .form-control, .meet .form-select { background-color: #22252d; border-color: #3a3e4a; color: #e5e7eb; }
@@ -330,3 +349,14 @@
   .tiles { --cols: 1 !important; }
   .ctrl { width: 2.7rem; height: 2.7rem; }
 }
+
+/* ------------------------------------------------------- incoming call */
+.incoming-call { position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center; background: rgba(9, 10, 14, .55); backdrop-filter: blur(3px); }
+.incoming-card { width: min(340px, calc(100% - 2rem)); padding: 1.6rem 1.4rem 1.3rem; border-radius: 1.2rem; text-align: center; background: #111318; color: #f1f5f9; box-shadow: 0 20px 50px rgba(0, 0, 0, .45); }
+.incoming-card .avatar { width: 4.5rem; height: 4.5rem; font-size: 1.6rem; margin: 0 auto .8rem; animation: ring-pulse 1.4s infinite; }
+.incoming-actions { display: flex; justify-content: center; gap: 2.2rem; margin-top: 1.3rem; }
+.incoming-actions .btn { width: 3.6rem; height: 3.6rem; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
+.incoming-actions .ic { width: 1.5rem; height: 1.5rem; }
+.incoming-actions small { display: block; margin-top: .35rem; opacity: .75; }
+@keyframes ring-pulse { 0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, .55); } 70% { box-shadow: 0 0 0 1.1rem rgba(34, 197, 94, 0); } 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); } }
+.msg-call { display: inline-flex; align-items: center; gap: .5rem; padding: .35rem .7rem; border-radius: .7rem; background: rgba(220, 38, 38, .08); color: #dc2626; font-size: .9rem; }

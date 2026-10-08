@@ -23,13 +23,24 @@ const RECHECK_MS = 10_000;
 // sfu.pull {tracks: [{participant_id, slot}]}, sfu.renegotiate {sdp},
 // sfu.close {mids} (sfu; replies carry `re`), media {audio, video, screen}, admit
 // {participant_id, accept}, remove {participant_id}, cohost {participant_id,
-// on}, end, leave.
+// on}, chat.send {client_id, body}, end, leave.
 // Server → client: lobby, admitted, rejected, joined, peer.joined,
 // peer.left, peer.media, peer.tracks, peer.role, signal, lobby.update,
-// removed, ended, error.
+// chat.message, chat.ok, call.declined, call.missed, removed, ended, error.
+//
+// In-call chat: a meeting started from a conversation chats in that
+// conversation — only participants who are its members see it (history
+// included) and their messages are ordinary conversation messages; anyone
+// else in the room (guests, colleagues let in from the lobby) gets no chat.
+// Other meetings have their own chat (meeting_messages), shared by everyone
+// admitted.
 const SLOTS = ['audio', 'camera', 'screen'];
-export function createRooms({ auth, orgs, meetings, media }) {
+const CHAT_RATE = [10, 10_000]; // messages per window, per connection
+export function createRooms({ auth, orgs, meetings, media, chat, users, notifier }) {
   const rooms = new Map(); // meetingId → { meeting, peers: Map<pid, ws>, lobby: Map<pid, ws> }
+  // Calls (core/calls.js) follow who joins and when a room empties.
+  const hooks = { joined: async () => {}, empty: async () => {} };
+  let closing = false; // shutdown: rooms empty because the server stops, not because people left
 
   // Revoked sessions leave their meetings at once.
   auth.onRevoke((hashes) => {
@@ -139,6 +150,7 @@ export function createRooms({ auth, orgs, meetings, media }) {
     ws.joinedAt = Date.now();
     if (r.peers.size === 1) await meetings.markLive(meeting);
     const canManage = !!ws.ctx.user && (await meetings.canManage(meeting, ws.ctx.user, ws.ctx.orgRole));
+    const chatState = await chatFor(ws, meeting);
     send(ws, 'joined', {
       self: peerInfo(ws),
       peers: [...r.peers.values()].filter((p) => p !== ws).map(peerInfo),
@@ -148,9 +160,101 @@ export function createRooms({ auth, orgs, meetings, media }) {
       can_manage: canManage,
       screen_share: participant.user_id ? true : !!policy.guest_screen_share,
       meeting: { id: meeting.id, title: meeting.title, host_id: meeting.host_id, expires_at: meeting.expires_at },
+      chat: chatState,
+      call: meeting.call_kind ? { kind: meeting.call_kind, ringing: meeting.ring_state === 'ringing' && meeting.ring_until > new Date().toISOString() } : null,
     });
     broadcast(r, 'peer.joined', peerInfo(ws), ws);
     if (canManage) lobbyUpdate(r);
+    hooks.joined(meeting, ws).catch((err) => console.error('Call hook failed:', err.message));
+  }
+
+  // ------------------------------------------------------------- room chat
+
+  // The chat this connection may use: 'conversation' (a member of the
+  // meeting's conversation), 'meeting' (a meeting without one), or 'none'.
+  async function chatFor(ws, meeting) {
+    ws.chatMode = 'none';
+    if (!meeting.conversation_id) {
+      ws.chatMode = 'meeting';
+      return { mode: 'meeting', messages: await meetings.chatMessages(meeting.id) };
+    }
+    if (!ws.ctx.user) return { mode: 'none', messages: [] };
+    const org = await orgs.byId(meeting.org_id);
+    try {
+      const { messages } = await chat.history(org, ws.ctx.user, meeting.conversation_id, { limit: 50 });
+      ws.chatMode = 'conversation';
+      return { mode: 'conversation', messages: (await Promise.all(messages.map(fromConversation))).filter(Boolean) };
+    } catch {
+      return { mode: 'none', messages: [] };
+    }
+  }
+
+  // Display names of conversation authors (the room has no directory).
+  const names = new Map();
+  async function nameOf(userId) {
+    if (!userId) return '';
+    if (!names.has(userId)) {
+      if (names.size > 5000) names.clear();
+      names.set(userId, (await users.byId(userId))?.name || '');
+    }
+    return names.get(userId);
+  }
+
+  // A conversation message as the room shows it (top-level text only).
+  async function fromConversation(m) {
+    if (m.parent_id || m.kind !== 'text') return null;
+    return {
+      id: m.id,
+      author_id: m.author_id,
+      name: await nameOf(m.author_id),
+      body: m.body.replace(/<@([A-Za-z0-9_-]+)>/g, '@…'),
+      client_id: m.client_message_id,
+      created_at: m.created_at,
+      deleted: !!m.deleted_at,
+      attachments: (m.attachments || []).map((a) => ({ id: a.id, name: a.name })),
+    };
+  }
+
+  function chatAllowed(ws) {
+    const now = Date.now();
+    ws.chatTimes = (ws.chatTimes || []).filter((t) => t > now - CHAT_RATE[1]);
+    if (ws.chatTimes.length >= CHAT_RATE[0]) return false;
+    ws.chatTimes.push(now);
+    return true;
+  }
+
+  async function chatSend(ws, r, data, id) {
+    if (!chatAllowed(ws)) throw Object.assign(new Error('Slow down'), { code: 'rate_limited', expose: true });
+    const meeting = r.meeting;
+    if (ws.chatMode === 'meeting') {
+      const message = await meetings.addChatMessage(meeting, ws.participant, data.client_id, data.body);
+      for (const peer of r.peers.values()) if (peer.chatMode === 'meeting') send(peer, 'chat.message', message);
+      return send(ws, 'chat.ok', { client_id: message.client_id }, id);
+    }
+    if (ws.chatMode !== 'conversation') throw Object.assign(new Error('No chat here'), { code: 'forbidden', expose: true });
+    // An ordinary conversation message: the event log brings it back to
+    // the room (onEvent) and to the conversation everywhere else.
+    const org = await orgs.byId(meeting.org_id);
+    const result = await chat.send(org, ws.ctx.user, { conversationId: meeting.conversation_id, clientMessageId: data.client_id, body: data.body });
+    if (!result.duplicate && notifier) {
+      chat.one(org, meeting.conversation_id, ws.ctx.user).then((conv) => conv && notifier.afterSend(org, ws.ctx.user, conv, result.message, result.mentioned)).catch(() => {});
+    }
+    send(ws, 'chat.ok', { client_id: result.message.client_message_id }, id);
+  }
+
+  // Durable chat events (core/events.js): new and changed messages of a
+  // conversation reach the rooms of its meetings, for the participants who
+  // are still its members.
+  async function onEvent(event) {
+    if ((event.type !== 'message.created' && event.type !== 'message.updated') || !event.conversation_id) return;
+    const targets = [...rooms.values()].filter((r) => r.meeting.conversation_id === event.conversation_id);
+    if (!targets.length) return;
+    const message = await fromConversation(event.data);
+    if (!message) return;
+    const members = new Set(await chat.memberIds(event.conversation_id));
+    for (const r of targets) {
+      for (const ws of r.peers.values()) if (ws.chatMode === 'conversation' && members.has(ws.ctx.user?.id)) send(ws, 'chat.message', message);
+    }
   }
 
   async function requireManager(ws) {
@@ -289,6 +393,9 @@ export function createRooms({ auth, orgs, meetings, media }) {
           await meetings.close(meeting, actor(ws), 'ended', ws.ctx.ip);
           return endRoom(meeting.id, 'ended');
         }
+        case 'chat.send':
+          if (!inRoom) return;
+          return await chatSend(ws, r, data, id);
         case 'leave':
           return ws.close(1000, 'left');
         default:
@@ -319,7 +426,10 @@ export function createRooms({ auth, orgs, meetings, media }) {
       r.peers.delete(ws.participant.id);
       broadcast(r, 'peer.left', { id: ws.participant.id });
       meetings.recordLeave(ws.participant.id, (Date.now() - ws.joinedAt) / 60_000, r.meeting.org_id).catch(() => {});
-      if (!r.peers.size) meetings.markIdle(r.meeting.id).catch(() => {});
+      if (!r.peers.size) {
+        meetings.markIdle(r.meeting.id).catch(() => {});
+        if (!closing) hooks.empty(r.meeting).catch((err) => console.error('Call hook failed:', err.message));
+      }
     }
     if (!r.peers.size && !r.lobby.size) rooms.delete(r.meeting.id);
   }
@@ -379,14 +489,26 @@ export function createRooms({ auth, orgs, meetings, media }) {
   }, RECHECK_MS);
   recheck.unref();
 
+  // A notice to everyone in a meeting's room on this node (calls).
+  function notifyRoom(meetingId, type, data = {}) {
+    const r = rooms.get(meetingId);
+    if (r) broadcast(r, type, data);
+  }
+
   return {
     authorizeUpgrade,
     attach,
+    onEvent,
+    notifyRoom,
+    setHooks: (h) => Object.assign(hooks, h),
     kickParticipant,
     endRoom,
     disconnectUser,
     live: (meetingId) => (rooms.get(meetingId)?.peers.size || 0),
     stats: () => ({ rooms: rooms.size, peers: [...rooms.values()].reduce((n, r) => n + r.peers.size, 0) }),
-    close: () => clearInterval(recheck),
+    close: () => {
+      closing = true;
+      clearInterval(recheck);
+    },
   };
 }

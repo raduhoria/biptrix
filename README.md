@@ -41,6 +41,8 @@ to the console.
 | Files | Uploads are streamed with an extension allowlist and magic-byte checks. Optional antivirus (`AV_SCAN_CMD`), quotas, opaque ids, storage outside the webroot, and authorized download. |
 | Search | FTS5 that ignores diacritics. Scoped to the caller's conversations. Filters: conversation, author, date. Also searches file names. |
 | Meetings | Instant or scheduled meetings, and calls from a DM or Space (posted as a card in the conversation). WebRTC mesh with lobby, host/co-host, admit, remove, end for all, screen share, device selection, active speaker. |
+| Calls | Audio or video call from a DM or group: every tab and device of the others rings (incoming-call screen, ring tone, answer/decline) for 45 s. Answered, declined, or missed: a "missed call" line in the conversation, an e-mail if they were offline. Spaces get the card only, no ringing. |
+| In-call chat | A call from a conversation chats in that conversation (its members only; the messages stay there). Other meetings have their own chat, shared with admitted guests, with history for late joiners and subject to message retention. |
 | External guests | A personal link (only the token hash is stored) leads to an e-mailed OTP (rate limited, attempts counted), then a guest session bound to the meeting, then the lobby. Revoking or ending the meeting closes the sessions and the sockets. |
 | External collaborators | Space moderators (or admins only, per policy) invite people from other companies by e-mail straight into a Space. They get the `external` role with access that expires after N days (90 by default). They see only the conversations shared with them: no directory, no browsing, cannot create Spaces. Each person shows an "external · domain" badge, and a Space that contains them shows a banner. Access can be extended or revoked from the admin console. |
 | Passwordless sign-in | A 6-digit code sent by e-mail: stored as an HMAC, valid 10 minutes, single use, rate limited. MFA, when enabled, still follows. Accounts created from an invitation can have no password at all. |
@@ -57,7 +59,7 @@ config/env.js        all configuration from environment variables
 db/connection.js     common async adapter: SQLite (node:sqlite, WAL) | rqlite (HTTP)
 db/schema.sql        schema (§13) + FTS5 + triggers; db/migrate.js versioned migrations
 core/                auth, orgs, policies, chat, events, realtime, meetings,
-                     meeting-rooms, media, files, notify, audit, smtp, totp, i18n
+                     meeting-rooms, calls, media, files, notify, audit, smtp, totp, i18n
 routes/              auth, chat (API), meetings (+ guest flow), admin, platform, static
 views/               pages and e-mails (template literals)
 public/js            chat.js, meeting.js, lib.js, console.js, theme.js

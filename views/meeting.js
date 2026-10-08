@@ -3,7 +3,7 @@ import { alerts, authPage, escapeHtml, icon, jsonData, page } from './layout.js'
 // Meeting room (members at /o/:org/meet/:id, verified guests at /meet/:id).
 // Pre-join (preview, devices, name) → lobby → room; all driven by
 // public/js/meeting.js over /ws/meeting.
-export function meetingRoomView({ t, meeting, org, mode, displayName = '', canInvite = false, backHref }) {
+export function meetingRoomView({ t, meeting, org, mode, displayName = '', canInvite = false, backHref, call = '', userId = null }) {
   const e = (key, params) => escapeHtml(t(key, params));
   const boot = {
     meeting: { id: meeting.id, title: meeting.title, host_id: meeting.host_id, expires_at: meeting.expires_at },
@@ -12,6 +12,8 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
     displayName,
     canInvite,
     backHref,
+    call,
+    userId,
     strings: t.client(),
   };
   const ctrl = (action, ic, label, extra = '') => `<button class="btn ctrl" data-action="${action}" title="${e(label)}" aria-label="${e(label)}" ${extra}>${icon(ic)}</button>`;
@@ -77,12 +79,23 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
   </section>
 
   <section class="stage stage-room" id="stage-room">
+    <div class="call-banner" id="call-banner" hidden></div>
     <div class="tiles" id="tiles"></div>
-    <aside class="meet-panel" id="meet-panel" hidden>
-      <header class="d-flex align-items-center mb-2">
-        <h3 class="h6 mb-0">${e('client.meet.people')}</h3>
-        <button class="btn btn-sm btn-icon ms-auto text-white" data-action="panel" aria-label="${e('common.close')}">${icon('x')}</button>
+    <aside class="meet-panel" id="meet-panel" data-tab="people" hidden>
+      <header class="d-flex align-items-center gap-1 mb-2">
+        <button class="btn btn-sm meet-tab" data-action="tab" data-tab="people">${e('client.meet.people')}</button>
+        <button class="btn btn-sm meet-tab" data-action="tab" data-tab="chat">${e('client.meet.chat')}</button>
+        <button class="btn btn-sm btn-icon ms-auto text-white" data-action="close-panel" aria-label="${e('common.close')}">${icon('x')}</button>
       </header>
+      <div class="meet-chat" id="meet-chat">
+        <div class="meet-chat-list" id="chat-list"></div>
+        <div class="small opacity-75 py-2" id="chat-none" hidden>${e('client.meet.chatNone')}</div>
+        <form class="meet-chat-form" id="chat-form" autocomplete="off">
+          <textarea class="form-control form-control-sm" name="body" rows="1" maxlength="2000" placeholder="${e('client.meet.chatPlaceholder')}"></textarea>
+          <button class="btn btn-sm btn-primary" aria-label="${e('client.meet.chatSend')}">${icon('send')}</button>
+        </form>
+      </div>
+      <div class="meet-people">
       <div id="lobby-box" hidden>
         <div class="small text-uppercase opacity-75 mb-1">${e('client.meet.waiting')}</div>
         <ul class="list-unstyled" id="lobby-list"></ul>
@@ -96,6 +109,7 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
         <button class="btn btn-sm btn-light w-100">${icon('mail')} ${e('client.meet.sendInvite')}</button>
         <div class="small mt-2" id="invite-status"></div>
       </form>` : ''}
+      </div>
     </aside>
   </section>
 
@@ -104,6 +118,7 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
     ${ctrl('cam', 'video', 'client.meet.camera')}
     ${ctrl('screen', 'screen', 'client.meet.share', 'id="btn-screen"')}
     ${ctrl('panel', 'users', 'client.meet.people')}<span class="badge rounded-pill text-bg-warning lobby-badge" id="lobby-badge" hidden></span>
+    ${ctrl('chat', 'chat', 'client.meet.chat', 'id="btn-chat"')}<span class="badge rounded-pill text-bg-primary lobby-badge" id="chat-badge" hidden></span>
     ${ctrl('copy-link', 'link', 'client.meet.copyLink')}
     <button class="btn ctrl ctrl-leave" data-action="leave" title="${e('client.meet.leave')}">${icon('phone-off')}</button>
     <button class="btn btn-sm btn-danger ms-2" data-action="end" id="btn-end" hidden>${e('client.meet.endAll')}</button>

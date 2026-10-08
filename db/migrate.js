@@ -18,6 +18,16 @@ const MIGRATIONS = [
       'ALTER TABLE memberships ADD COLUMN access_expires_at TEXT',
     ],
   ],
+  // Calls: a meeting started from a DM or group rings the other members
+  // (audio or video call); ring_state: ringing | answered | declined | missed.
+  [
+    4,
+    [
+      'ALTER TABLE meetings ADD COLUMN call_kind TEXT',
+      'ALTER TABLE meetings ADD COLUMN ring_state TEXT',
+      'ALTER TABLE meetings ADD COLUMN ring_until TEXT',
+    ],
+  ],
 ];
 
 export async function runMigrations(db) {

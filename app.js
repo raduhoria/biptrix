@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createDb } from './db/connection.js';
 import { runMigrations } from './db/migrate.js';
 import { createAudit } from './core/audit.js';
+import { createCalls } from './core/calls.js';
 import { createAuth } from './core/auth.js';
 import { createChat } from './core/chat.js';
 import { createEvents } from './core/events.js';
@@ -56,11 +57,19 @@ export async function createApp(config, { quiet = false } = {}) {
   configureEmails({ name: config.smtp.fromName, url: config.appUrl });
   const mailer = createMailer({ smtp: config.smtp, quiet });
   const loginCodes = createLoginCodes({ db, secret: appSecret });
-  const rooms = createRooms({ auth, orgs, meetings, media });
   let realtime = null;
-  const notifier = createNotifier({ db, mailer, policies, config, isOnline: (orgId, userId) => realtime.isOnline(orgId, userId) });
+  const isOnline = (orgId, userId) => realtime.isOnline(orgId, userId);
+  const notifier = createNotifier({ db, mailer, policies, config, isOnline });
+  const rooms = createRooms({ auth, orgs, meetings, media, chat, users, notifier });
   realtime = createRealtime({ config, auth, orgs, chat, events, rooms, notifier });
-  await events.start(realtime.deliver, (event) => realtime.resetOrg(event.org_id));
+  const calls = createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline });
+  // Durable events go to the chat sockets, and conversation messages also
+  // to the rooms of meetings started from that conversation (in-call chat).
+  const deliver = async (event) => {
+    await realtime.deliver(event);
+    rooms.onEvent(event).catch((err) => console.error('Room chat delivery failed:', err.message));
+  };
+  await events.start(deliver, (event) => realtime.resetOrg(event.org_id));
 
   // Readiness: the database answers (rqlite: a quorum-backed read).
   async function health() {
@@ -83,7 +92,7 @@ export async function createApp(config, { quiet = false } = {}) {
 
   const router = createRouter({ onError });
   registerStatic(router, path.join(import.meta.dirname, 'public'), { dev: config.dev });
-  const deps = { db, config, loginCodes, auth, users, orgs, policies, events, chat, files, meetings, media, mailer, rooms, realtime, notifier, audit, secretBox, health };
+  const deps = { calls, db, config, loginCodes, auth, users, orgs, policies, events, chat, files, meetings, media, mailer, rooms, realtime, notifier, audit, secretBox, health };
   registerAuthRoutes(router, deps);
   registerChatRoutes(router, deps);
   registerMeetingRoutes(router, deps);
@@ -126,13 +135,14 @@ export async function createApp(config, { quiet = false } = {}) {
   server.on('upgrade', (req, socket, head) => realtime.handleUpgrade(req, socket, head));
 
   // Housekeeping: expired sessions/tokens/login codes, the event replay window, orphan
-  // uploads, message retention per policy, the file deletion queue, WAL
+  // uploads, calls past their ringing deadline, message retention per policy (in-call chat included), the file deletion queue, WAL
   // checkpoint. Retention also removes the copies of deleted messages kept
   // in the event log, so no text outlives the policy there either.
   async function maintenance() {
     try {
       await auth.pruneExpired();
       await loginCodes.prune();
+      await calls.sweep();
       for (const r of await orgs.expireCollaborators()) realtime.disconnectUser(r.user_id, r.org_id);
       await events.prune(7);
       await files.pruneOrphans();
@@ -140,6 +150,7 @@ export async function createApp(config, { quiet = false } = {}) {
         const cutoff = new Date(Date.now() - row.days * 86400_000).toISOString();
         await db.batch([
           ['DELETE FROM messages WHERE org_id = ? AND created_at < ? AND pinned_at IS NULL', [row.org_id, cutoff]],
+          ['DELETE FROM meeting_messages WHERE org_id = ? AND created_at < ?', [row.org_id, cutoff]],
           [
             `DELETE FROM events WHERE org_id = ? AND type IN ('message.created', 'message.updated')
                AND NOT EXISTS (SELECT 1 FROM messages WHERE id = json_extract(events.data, '$.id'))`,
@@ -159,8 +170,9 @@ export async function createApp(config, { quiet = false } = {}) {
   async function close() {
     clearInterval(timer);
     events.stop();
-    realtime.close();
     rooms.close();
+    realtime.close();
+    calls.close();
     await new Promise((resolve) => server.close(resolve));
     await db.close();
   }

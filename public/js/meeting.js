@@ -40,7 +40,12 @@ const state = {
   spotlight: true,
   lobby: [],
   audioCtx: null,
+  // In-call chat: mode conversation | meeting | none (see core/meeting-rooms.js).
+  chat: { mode: 'none', messages: [], pending: new Map(), unread: 0 },
+  ringing: false,
 };
+// From a call (?call=audio|video): the camera follows the call kind.
+if (boot.call) state.cam = boot.call === 'video';
 
 function stage(name) {
   root.dataset.stage = name;
@@ -200,7 +205,16 @@ function onServer(type, d) {
     }
     case 'peer.joined':
       addPeer(d, false);
+      if (state.ringing) callBanner('');
       return renderPeople();
+    case 'chat.message':
+      return onChatMessage(d);
+    case 'call.declined':
+      state.ringing = false;
+      return callBanner(t('meet.callDeclined', { name: d.name }));
+    case 'call.missed':
+      state.ringing = false;
+      return state.peers.size ? callBanner('') : callBanner(t('meet.callMissed'));
     case 'peer.left':
       removePeer(d.id);
       return renderPeople();
@@ -254,7 +268,114 @@ function onJoined(d) {
   }
   renderPeople();
   layout();
+  onChatState(d.chat);
+  // The caller, alone in the room while the others' phones ring.
+  state.ringing = !!d.call?.ringing && !state.peers.size && state.self.role === 'host';
+  if (state.ringing) callBanner(t('meet.calling'), true);
 }
+
+// ------------------------------------------------------------------- calls
+
+function callBanner(text, ringing = false) {
+  const el = $('#call-banner');
+  el.hidden = !text;
+  el.innerHTML = text ? `${ringing ? '<span class="ring-dot"></span>' : ''}${esc(text)}` : '';
+}
+
+// --------------------------------------------------------------- room chat
+// Messages are sent over the room socket and confirmed (chat.ok); until
+// then they show as pending, and are sent again after a reconnect with the
+// same client id (the server stores each once).
+
+function onChatState(chat) {
+  state.chat.mode = chat?.mode || 'none';
+  state.chat.messages = chat?.messages || [];
+  $('#btn-chat').hidden = state.chat.mode === 'none' && !state.chat.messages.length;
+  $('#chat-none').hidden = state.chat.mode !== 'none';
+  $('#chat-form').hidden = state.chat.mode === 'none';
+  for (const p of state.chat.pending.values()) sendChat(p);
+  renderChat(true);
+}
+
+const isMine = (m) => (m.participant_id && m.participant_id === state.self?.id) || (!!m.author_id && m.author_id === boot.userId);
+
+function onChatMessage(m) {
+  const list = state.chat.messages;
+  const i = list.findIndex((x) => x.id === m.id);
+  if (m.deleted) {
+    if (i >= 0) list.splice(i, 1);
+  } else if (i >= 0) list[i] = m;
+  else {
+    list.push(m);
+    if (!isMine(m) && !chatOpen()) {
+      state.chat.unread++;
+      renderChatBadge();
+    }
+  }
+  state.chat.pending.delete(m.client_id);
+  renderChat();
+}
+
+const chatOpen = () => !$('#meet-panel').hidden && $('#meet-panel').dataset.tab === 'chat';
+
+function renderChatBadge() {
+  const badge = $('#chat-badge');
+  badge.hidden = !state.chat.unread;
+  badge.textContent = state.chat.unread > 9 ? '9+' : state.chat.unread;
+}
+
+function renderChat(scroll = false) {
+  const box = $('#chat-list');
+  const atBottom = scroll || box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const time = (iso) => new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const files = (m) => (m.attachments || []).map((a) => `<div><a href="/api/o/${esc(boot.org.slug)}/files/${esc(a.id)}" target="_blank" rel="noopener">📎 ${esc(a.name)}</a></div>`).join('');
+  const row = (m, pending = false) => {
+    const mine = pending || isMine(m);
+    return `<div class="meet-msg${mine ? ' mine' : ''}${pending ? ' pending' : ''}">
+      <div class="meet-msg-head">${mine ? '' : `${esc(m.name)} · `}${esc(time(m.created_at))}</div>
+      <div class="meet-msg-body">${esc(m.body)}${files(m)}</div></div>`;
+  };
+  box.innerHTML = [...state.chat.messages.map((m) => row(m)), ...[...state.chat.pending.values()].map((p) => row(p, true))].join('');
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+function sendChat(p) {
+  request('chat.send', { client_id: p.client_id, body: p.body }).catch(() => {
+    // Kept as pending; sent again on the next join.
+  });
+}
+
+// Bar buttons toggle their tab; the tab headers only switch.
+function showPanel(tab, toggle = true) {
+  const panel = $('#meet-panel');
+  panel.hidden = toggle && !panel.hidden && panel.dataset.tab === tab;
+  panel.dataset.tab = tab;
+  if (!panel.hidden && tab === 'chat') {
+    state.chat.unread = 0;
+    renderChatBadge();
+    renderChat(true);
+    $('#chat-form textarea').focus();
+  }
+}
+
+$('#chat-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const area = e.target.body;
+  const body = area.value.trim();
+  if (!body || state.chat.mode === 'none') return;
+  const p = { client_id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`, body, created_at: new Date().toISOString() };
+  state.chat.pending.set(p.client_id, p);
+  area.value = '';
+  renderChat(true);
+  sendChat(p);
+});
+
+$('#chat-form textarea').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    $('#chat-form').requestSubmit();
+  }
+});
 
 // ---------------------------------------------------------------------- sfu
 // Cloudflare refuses to pull a track that has not sent packets yet, so audio
@@ -662,6 +783,7 @@ function onLobby(waiting) {
   badge.textContent = waiting.length;
   if (grew) {
     $('#meet-panel').hidden = false;
+    $('#meet-panel').dataset.tab = 'people';
     if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
       new Notification(t('meet.someoneWaiting'), { body: waiting.at(-1).name, icon: '/favicon.svg' });
     }
@@ -761,7 +883,13 @@ root.addEventListener('click', async (e) => {
     case 'screen':
       return toggleScreen();
     case 'panel':
-      $('#meet-panel').hidden = !$('#meet-panel').hidden;
+      return showPanel('people');
+    case 'chat':
+      return showPanel('chat');
+    case 'tab':
+      return showPanel(btn.dataset.tab, false);
+    case 'close-panel':
+      $('#meet-panel').hidden = true;
       return;
     case 'toggle-layout':
       state.spotlight = !state.spotlight;
@@ -848,4 +976,9 @@ setInterval(() => {
   }
   await listDevices().catch(() => {});
   renderPreview();
+  // A call goes straight into the room.
+  if (boot.call) {
+    $('[data-action="join"]').disabled = true;
+    connect();
+  }
 })();
