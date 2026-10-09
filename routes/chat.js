@@ -113,6 +113,17 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
     res.json({ ok: true });
   });
 
+  // Personal notifications for a conversation: all | mentions | none.
+  router.post(api('/conversations/:id/notify'), ...member, async (req, res) => {
+    await chat.setNotify(req.org, req.user, conv(req), String((await readJson(req)).level || ''));
+    res.json({ conversation: await chat.one(req.org, conv(req), req.user) });
+  });
+
+  router.post(api('/conversations/:id/archive'), ...member, async (req, res) => {
+    await chat.archiveOwn(req.org, req.user, role(req), conv(req), req.ip);
+    res.json({ ok: true });
+  });
+
   // External collaborators: invite someone by e-mail into a Space. A person
   // already in the organization is simply added (chat.addMembers applies the
   // collaborator policy when that person is an external collaborator);
@@ -167,11 +178,6 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
 
   router.post(api('/dms'), ...member, async (req, res) => {
     res.json({ conversation: await chat.openDm(req.org, req.user, role(req), String((await readJson(req)).user_id || '')) });
-  });
-
-  router.post(api('/groups'), ...member, async (req, res) => {
-    const body = await readJson(req);
-    res.json({ conversation: await chat.createGroup(req.org, req.user, role(req), { memberIds: body.user_ids || [], name: body.name }) });
   });
 
   router.post(api('/spaces'), ...member, async (req, res) => {

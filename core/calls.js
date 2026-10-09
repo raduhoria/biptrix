@@ -2,12 +2,14 @@ import { createTranslator } from './i18n.js';
 import { nowIso } from './util.js';
 import { missedCallEmail } from '../views/emails.js';
 import { orgSender } from './mailer.js';
+import { SMALL_SPACE } from './chat.js';
 
 export const RING_MS = 45_000;
 const HANG_UP_GRACE_MS = 15_000;
-const MAX_RING = 20; // larger conversations get the meeting card, no ringing
+const MAX_RING = SMALL_SPACE; // larger Spaces get the meeting card, no ringing
 
-// createCalls: a call started from a DM or a group rings the other members.
+// createCalls: a call started from a DM or a small Space rings the other
+// members (not those who turned the conversation's notifications off).
 // The meeting carries the call (call_kind audio|video, ring_state, ring_until);
 // each callee gets a user-scoped durable event `call.ring` (every open tab
 // and device rings until ring_until) and `call.stop` when it is over for
@@ -57,8 +59,9 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
   const callees = async (meeting) => (await chat.memberIds(meeting.conversation_id)).filter((id) => id !== meeting.host_id);
 
   async function ring(org, caller, conversation, meeting, kind) {
-    if (!['dm', 'group'].includes(conversation.type)) return [];
-    const targets = (await chat.memberIds(conversation.id)).filter((id) => id !== caller.id);
+    if (!['dm', 'space'].includes(conversation.type)) return [];
+    const { quiet } = await chat.notifyTargets(conversation.id);
+    const targets = (await chat.memberIds(conversation.id)).filter((id) => id !== caller.id && !quiet.includes(id));
     if (!targets.length || targets.length > MAX_RING) return [];
     const until = new Date(Date.now() + RING_MS).toISOString();
     const data = { meeting_id: meeting.id, conversation_id: conversation.id, from: caller.id, from_name: caller.name, kind, ring_until: until };

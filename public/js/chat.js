@@ -69,6 +69,8 @@ function convIcon(c) {
 
 const saveOutbox = () => localStorage.setItem(OUTBOX_KEY, JSON.stringify([...state.outbox]));
 const isVisible = () => document.visibilityState === 'visible' && document.hasFocus();
+// Same as the server (core/chat.js): small Spaces ring and notify everything.
+const SMALL_SPACE = 20;
 
 function setUrl(path) {
   if (location.pathname !== path) history.pushState({}, '', path);
@@ -272,7 +274,7 @@ function renderSidebar() {
     return `<li><a class="conv-item${c.id === state.current ? ' active' : ''}${unread ? ' unread' : ''}" href="/o/${esc(ORG.slug)}/c/${esc(c.id)}" data-conv="${esc(c.id)}">
       ${convIcon(c)}
       <span class="conv-text"><span class="conv-name">${esc(convName(c))}</span>${preview ? `<span class="conv-preview">${esc(preview.slice(0, 80))}</span>` : ''}</span>
-      ${c.muted ? icon('bell-off', 'text-body-tertiary') : ''}
+      ${c.notify === 'none' ? icon('bell-off', 'text-body-tertiary') : ''}
       ${unread ? `<span class="badge rounded-pill ${c.mentions ? 'text-bg-danger' : 'text-bg-primary'}">${c.mentions ? '@' : ''}${c.unread > 99 ? '99+' : c.unread}</span>` : ''}
     </a></li>`;
   };
@@ -281,7 +283,7 @@ function renderSidebar() {
   $('#list-direct').innerHTML = direct.map(item).join('') || `<li class="side-empty">${esc(t('noDirect'))}</li>`;
   $('#list-spaces').innerHTML = spaces.map(item).join('') || `<li class="side-empty">${esc(t('noSpaces'))}</li>`;
   // Unread total on the installed app's icon.
-  const unreadTotal = list.reduce((n, c) => n + (c.muted ? 0 : c.unread || 0), 0);
+  const unreadTotal = list.reduce((n, c) => n + (c.notify === 'none' ? 0 : c.unread || 0), 0);
   if (navigator.setAppBadge) (unreadTotal ? navigator.setAppBadge(unreadTotal) : navigator.clearAppBadge()).catch(() => {});
   const total = list.reduce((n, c) => n + (c.id === state.current && isVisible() ? 0 : c.unread || 0), 0);
   document.title = `${total ? `(${total}) ` : ''}${ORG.name}`;
@@ -377,13 +379,17 @@ function renderHeader() {
     banner.hidden = !(c.external_count > 0);
     banner.innerHTML = c.external_count > 0 ? `${icon('globe')} ${esc(t(c.external_count === 1 ? 'externalBannerOne' : 'externalBanner', { n: c.external_count }))}` : '';
   }
-  const canEdit = c.type === 'group' || (c.type === 'space' && (c.my_role === 'moderator' || ['owner', 'admin'].includes(boot.role)));
+  const canEdit = c.type === 'space' && (c.my_role === 'moderator' || ['owner', 'admin'].includes(boot.role));
   $('#conv-menu').innerHTML = [
     // On phones, pinned and members live here (the header keeps the calls).
     `<li class="d-sm-none"><button class="dropdown-item" data-action="pinned">${icon('pin')} ${esc(t('pinned'))}</button></li>`,
     `<li class="d-sm-none"><button class="dropdown-item" data-action="members">${icon('users')} ${esc(t('members'))}</button></li>`,
-    `<li><button class="dropdown-item" data-action="mute">${icon(c.muted ? 'bell' : 'bell-off')} ${esc(t(c.muted ? 'unmute' : 'mute'))}</button></li>`,
-    canEdit ? `<li><button class="dropdown-item" data-action="rename">${icon('edit')} ${esc(t('rename'))}</button></li>` : '',
+    c.type === 'space' ? `<li><button class="dropdown-item" data-action="space-settings">${icon('settings')} ${esc(t(canEdit ? 'spaceSettings' : 'spaceAbout'))}</button></li>` : '',
+    `<li><hr class="dropdown-divider"></li><li><h6 class="dropdown-header">${esc(t('notifyTitle'))}</h6></li>`,
+    ...(c.type === 'dm' ? ['all', 'none'] : ['all', 'mentions', 'none']).map(
+      (level) => `<li><button class="dropdown-item d-flex align-items-center gap-2" data-action="notify" data-level="${level}">${icon(c.notify === level ? 'check' : level === 'none' ? 'bell-off' : 'bell', c.notify === level ? '' : 'opacity-50')} ${esc(t(`notify.${level}`))}</button></li>`
+    ),
+    `<li><hr class="dropdown-divider"></li>`,
     `<li><button class="dropdown-item" data-action="search-here">${icon('search')} ${esc(t('searchHere'))}</button></li>`,
     c.type !== 'dm' ? `<li><hr class="dropdown-divider"></li><li><button class="dropdown-item text-danger" data-action="leave">${icon('door')} ${esc(t('leave'))}</button></li>` : '',
   ].join('');
@@ -721,8 +727,8 @@ function onMessage(m, created) {
       const mentioned = m.body.includes(`<@${ME}>`);
       if (mentioned) c.mentions = (c.mentions || 0) + 1;
       // (A call that rings has its own screen, see onRing.)
-      const rings = m.kind === 'meeting' && m.meta?.call && c.type !== 'space';
-      if (!c.muted && !rings && (mentioned || c.type === 'dm' || m.kind === 'meeting')) notify(c, m);
+      const rings = m.kind === 'meeting' && m.meta?.call && (c.type === 'dm' || c.member_count <= SMALL_SPACE) && c.notify !== 'none';
+      if (c.notify !== 'none' && !rings && (mentioned || c.notify === 'all' || m.kind === 'meeting')) notify(c, m);
     }
   }
   renderSidebar();
@@ -1187,10 +1193,15 @@ const modalEl = $('#modal');
 let modal = null;
 const getModal = () => (modal ||= window.bootstrap.Modal.getOrCreateInstance(modalEl));
 
+// All dialogs share one container: each starts with no handlers left over
+// from the previous one (they set root.onclick / root.onchange).
 function openModal(html, onReady) {
-  $('#modal-content').innerHTML = html;
+  const root = $('#modal-content');
+  root.innerHTML = html;
+  root.onclick = null;
+  root.onchange = null;
   getModal().show();
-  onReady?.($('#modal-content'));
+  onReady?.(root);
 }
 
 const closeModal = () => getModal().hide();
@@ -1236,11 +1247,11 @@ function wirePicker(root) {
     const q = filter.value.trim().toLowerCase();
     for (const row of $$('.picker-list label', root)) row.hidden = q && !row.dataset.name.includes(q);
   };
-  root.addEventListener('change', () => {
+  root.onchange = () => {
     $('[data-picked]', root).innerHTML = $$('input[name="people"]:checked', root)
       .map((i) => `<span class="badge text-bg-primary me-1">${esc(person(i.value).name)}</span>`)
       .join('');
-  });
+  };
 }
 
 const picked = (root) => $$('input[name="people"]:checked', root).map((i) => i.value);
@@ -1353,6 +1364,18 @@ async function adopt(conversation) {
   await openConversation(conversation.id);
 }
 
+// Name, description and visibility of a Space, each with what it means.
+function spaceFields(c) {
+  const radio = (value, ic) => `<div class="form-check mb-2"><input class="form-check-input" type="radio" name="visibility" value="${value}" id="v-${value}"${c.visibility === value ? ' checked' : ''}>
+    <label class="form-check-label" for="v-${value}">${icon(ic)} <strong>${esc(t(`visibility.${value}`))}</strong>
+    <small class="text-body-secondary d-block">${esc(t(value === 'public' ? 'visibilityPublicHelp' : 'visibilityPrivateHelp'))}</small></label></div>`;
+  return `<div class="mb-3"><label class="form-label">${esc(t('spaceName'))}</label><input class="form-control" name="name" maxlength="80" required value="${esc(c.name || '')}">
+      <div class="form-text">${esc(t('spaceNameHelp'))}</div></div>
+    <div class="mb-3"><label class="form-label">${esc(t('description'))}</label><textarea class="form-control" name="description" rows="2" maxlength="500">${esc(c.description || '')}</textarea>
+      <div class="form-text">${esc(t('spaceDescriptionHelp'))}</div></div>
+    <div class="mb-3"><div class="form-label">${esc(t('spaceVisibility'))}</div>${radio('public', 'hash')}${radio('private', 'lock')}</div>`;
+}
+
 const modals = {
   'new-dm': () =>
     openModal(modalShell(t('newDm'), pickerHtml({ multi: false }), t('open')), (root) => {
@@ -1363,24 +1386,13 @@ const modals = {
         await adopt((await api(`${API}/dms`, { method: 'POST', body: { user_id: id } })).conversation);
       });
     }),
-  'new-group': () =>
-    openModal(modalShell(t('newGroup'), `<input class="form-control mb-3" name="name" maxlength="80" placeholder="${esc(t('groupNameOptional'))}">${pickerHtml({ multi: true })}`, t('create')), (root) => {
-      wirePicker(root);
-      onModalSubmit(root, async (form) => {
-        const ids = picked(root);
-        if (!ids.length) throw new Error(t('pickSomeone'));
-        await adopt((await api(`${API}/groups`, { method: 'POST', body: { user_ids: ids, name: form.name.value } })).conversation);
-      });
-    }),
   'new-space': () =>
     openModal(
       modalShell(
         t('newSpace'),
-        `<div class="mb-3"><label class="form-label">${esc(t('spaceName'))}</label><input class="form-control" name="name" maxlength="80" required></div>
-        <div class="mb-3"><label class="form-label">${esc(t('description'))}</label><textarea class="form-control" name="description" rows="2" maxlength="500"></textarea></div>
-        <div class="mb-3"><div class="form-check"><input class="form-check-input" type="radio" name="visibility" value="public" id="v-pub" checked><label class="form-check-label" for="v-pub">${icon('hash')} ${esc(t('visibility.public'))} <small class="text-body-secondary d-block">${esc(t('visibilityPublicHelp'))}</small></label></div>
-        <div class="form-check"><input class="form-check-input" type="radio" name="visibility" value="private" id="v-priv"><label class="form-check-label" for="v-priv">${icon('lock')} ${esc(t('visibility.private'))} <small class="text-body-secondary d-block">${esc(t('visibilityPrivateHelp'))}</small></label></div></div>
-        <label class="form-label">${esc(t('addPeople'))}</label>${pickerHtml({ multi: true })}`,
+        `${spaceFields({ name: '', description: '', visibility: 'public' })}
+        <label class="form-label">${esc(t('addPeople'))}</label>${pickerHtml({ multi: true })}
+        <p class="small text-body-secondary mt-2 mb-0">${icon('crown')} ${esc(t('spaceYouModerate'))}</p>`,
         t('create')
       ),
       (root) => {
@@ -1391,6 +1403,67 @@ const modals = {
         });
       }
     ),
+  // Space settings: editable by moderators and org owners/admins, read-only
+  // (an "about" view) for everyone else.
+  'space-settings': () => {
+    const c = state.conversations.get(state.current);
+    if (!c || c.type !== 'space') return;
+    const canEdit = c.my_role === 'moderator' || ['owner', 'admin'].includes(boot.role);
+    const extras = `<div class="space-help small">
+        <div class="fw-semibold mb-1">${icon('crown')} ${esc(t('spaceModeratorsTitle'))}</div>
+        <div class="text-body-secondary mb-2">${esc(t('spaceModeratorsHelp'))}</div>
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-action="members" data-bs-dismiss="modal">${icon('users')} ${esc(t('spaceManageMembers'))}</button>
+      </div>
+      <div class="space-help small">
+        <div class="fw-semibold mb-1">${icon('globe')} ${esc(t('spaceExternalsTitle'))}</div>
+        <div class="text-body-secondary">${esc(t(c.external_count ? 'spaceExternalsSome' : 'spaceExternalsNone', { n: c.external_count || 0 }))}</div>
+      </div>
+      <div class="space-help small">
+        <div class="fw-semibold mb-1">${icon('bell')} ${esc(t('notifyTitle'))}</div>
+        <div class="text-body-secondary">${esc(t('spaceNotifyHelp', { n: SMALL_SPACE }))}</div>
+      </div>`;
+    if (!canEdit) {
+      return openModal(
+        `<div class="modal-header"><h2 class="modal-title h5">${icon(c.visibility === 'private' ? 'lock' : 'hash')} ${esc(c.name)}</h2><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body"><p>${esc(c.description || t('spaceNoDescription'))}</p>
+        <p class="small text-body-secondary">${esc(t(c.visibility === 'private' ? 'visibilityPrivateHelp' : 'visibilityPublicHelp'))}</p>${extras}</div>`
+      );
+    }
+    openModal(
+      modalShell(
+        t('spaceSettings'),
+        `${spaceFields(c)}
+        <div class="alert alert-warning small py-2" data-public-warning hidden>${icon('alert')} ${esc(t('spaceGoPublicWarning'))}</div>
+        ${extras}
+        <div class="space-help small border-danger-subtle">
+          <div class="fw-semibold mb-1">${icon('door')} ${esc(t('spaceArchiveTitle'))}</div>
+          <div class="text-body-secondary mb-2">${esc(t('spaceArchiveHelp'))}</div>
+          <button type="button" class="btn btn-sm btn-outline-danger" data-archive-space>${esc(t('spaceArchive'))}</button>
+        </div>`,
+        t('save')
+      ),
+      (root) => {
+        const warn = $('[data-public-warning]', root);
+        root.onchange = () => (warn.hidden = !(c.visibility === 'private' && root.querySelector('[name=visibility]:checked')?.value === 'public'));
+        $('[data-archive-space]', root).addEventListener('click', async () => {
+          if (!(await confirmBox(t('spaceArchiveConfirm', { name: c.name })))) return;
+          try {
+            await api(`${API}/conversations/${c.id}/archive`, { method: 'POST', body: {} });
+            dropConversation(c.id);
+          } catch (err) {
+            toast(errorText(err), 'danger');
+          }
+        });
+        onModalSubmit(root, async (form) => {
+          await api(`${API}/conversations/${c.id}/update`, { method: 'POST', body: { name: form.name.value, description: form.description.value, visibility: form.visibility.value } });
+          Object.assign(c, { name: form.name.value.trim() || c.name, description: form.description.value.trim(), visibility: form.visibility.value });
+          renderHeader();
+          renderSidebar();
+          toast(t('saved'), 'success');
+        });
+      }
+    );
+  },
   'browse-spaces': async () => {
     const { spaces } = await api(`${API}/spaces`);
     openModal(
@@ -1457,9 +1530,12 @@ const modals = {
       }
     );
   },
-  'add-members': () => {
+  'add-members': async () => {
     const c = state.conversations.get(state.current);
-    openModal(modalShell(t('addPeople'), pickerHtml({ multi: true, exclude: c.member_ids || [] }), t('add')), (root) => {
+    // Spaces do not carry their member list: fetch it, so people already in
+    // are not offered again.
+    const current = c.type === 'space' ? (await api(`${API}/conversations/${c.id}/members`)).members.map((m) => m.id) : c.member_ids || [];
+    openModal(modalShell(t('addPeople'), pickerHtml({ multi: true, exclude: current }), t('add')), (root) => {
       wirePicker(root);
       onModalSubmit(root, async () => {
         const ids = picked(root);
@@ -1482,21 +1558,6 @@ const modals = {
           const res = await api(`${API}/conversations/${c.id}/invite`, { method: 'POST', body: { email: form.email.value } });
           toast(t(res.status === 'added' ? 'memberAdded' : 'inviteSent'), 'success');
           if (state.panel === 'members') openMembers();
-        })
-    );
-  },
-  rename: () => {
-    const c = state.conversations.get(state.current);
-    openModal(
-      modalShell(
-        t('rename'),
-        `<div class="mb-3"><label class="form-label">${esc(t('name'))}</label><input class="form-control" name="name" maxlength="80" value="${esc(c.name || '')}"></div>
-        ${c.type === 'space' ? `<div><label class="form-label">${esc(t('description'))}</label><textarea class="form-control" name="description" rows="2" maxlength="500">${esc(c.description || '')}</textarea></div>` : ''}`,
-        t('save')
-      ),
-      (root) =>
-        onModalSubmit(root, async (form) => {
-          await api(`${API}/conversations/${c.id}/update`, { method: 'POST', body: { name: form.name.value, description: form.description?.value } });
         })
     );
   },
@@ -1555,7 +1616,7 @@ async function manageMeeting(id) {
           fail(err);
         }
       };
-      root.addEventListener('click', async (e) => {
+      root.onclick = async (e) => {
         const revoke = e.target.closest('[data-revoke]');
         try {
           if (revoke) {
@@ -1569,7 +1630,7 @@ async function manageMeeting(id) {
         } catch (err) {
           fail(err);
         }
-      });
+      };
     }
   );
 }
@@ -1678,11 +1739,15 @@ document.addEventListener('click', async (e) => {
       }
       return;
     }
-    case 'mute':
-      await api(`${API}/conversations/${c.id}/mute`, { method: 'POST', body: { muted: !c.muted } });
-      c.muted = !c.muted;
+    case 'notify': {
+      const { conversation } = await api(`${API}/conversations/${c.id}/notify`, { method: 'POST', body: { level: el.dataset.level } });
+      Object.assign(c, { notify: conversation.notify, muted: conversation.muted });
+      toast(t('notifySaved', { level: t(`notify.${conversation.notify}`) }), 'success');
       renderHeader();
       return renderSidebar();
+    }
+    case 'space-settings':
+      return modals['space-settings']();
     case 'leave':
       if (!(await confirmBox(t('leaveConfirm', { name: convName(c) })))) return;
       try {

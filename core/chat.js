@@ -5,6 +5,9 @@ import { appError, newId, nowIso, parseJson } from './util.js';
 const MAX_BODY = 10_000;
 const MAX_ATTACHMENTS = 10;
 const PAGE = 50;
+// Up to this many members a Space behaves like a small team: calls ring
+// everyone and every message notifies (each person can change it).
+export const SMALL_SPACE = 20;
 // Mentions are stored in the body as <@userId>; the client renders names.
 const MENTION_RE = /<@([A-Za-z0-9_-]{10,40})>/g;
 const EMOJI_RE = /^[^\s<>"'`]{1,16}$/;
@@ -25,6 +28,12 @@ export function createChat({ db, events, audit, policies }) {
   const parseMessage = (row) => (row ? JSON.parse(row.json) : null);
 
   // --------------------------------------------------------- conversations
+
+  // A person's notifications for a conversation: their choice, or by size —
+  // everything in a DM or a Space of up to SMALL_SPACE people, only mentions
+  // in a bigger one.
+  const notifyLevel = (conv, member) => member.notify || (member.muted ? 'none' : conv.type === 'dm' || conv.member_count <= SMALL_SPACE ? 'all' : 'mentions');
+
 
   async function requireConversation(org, user, conversationId) {
     const row = await db.get(
@@ -52,7 +61,7 @@ export function createChat({ db, events, audit, policies }) {
 
   async function list(org, user) {
     const rows = await db.all(
-      `SELECT ${conversationJson} AS json, cm.last_read_seq, cm.role, cm.muted,
+      `SELECT ${conversationJson} AS json, cm.last_read_seq, cm.role, cm.muted, cm.notify,
          (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.seq > cm.last_read_seq AND m.author_id IS NOT ? AND m.deleted_at IS NULL) AS unread,
          (SELECT COUNT(*) FROM message_mentions mm WHERE mm.user_id = ? AND mm.conversation_id = c.id AND mm.seq > cm.last_read_seq) AS mentions,
          (SELECT json_object('author_id', m.author_id, 'body', CASE WHEN m.deleted_at IS NULL THEN substr(m.body, 1, 140) ELSE '' END, 'kind', m.kind, 'created_at', m.created_at)
@@ -62,19 +71,19 @@ export function createChat({ db, events, audit, policies }) {
        ORDER BY COALESCE(c.last_message_at, c.created_at) DESC`,
       [user.id, user.id, user.id, org.id]
     );
-    return rows.map((r) => ({ ...JSON.parse(r.json), last_read_seq: r.last_read_seq, my_role: r.role, muted: !!r.muted, unread: r.unread, mentions: r.mentions, last_message: parseJson(r.last_message, null) }));
+    return rows.map((r) => ({ ...JSON.parse(r.json), last_read_seq: r.last_read_seq, my_role: r.role, muted: !!r.muted, notify: notifyLevel(JSON.parse(r.json), r), unread: r.unread, mentions: r.mentions, last_message: parseJson(r.last_message, null) }));
   }
 
   // One conversation of `org` the user belongs to (null otherwise).
   async function one(org, conversationId, user) {
     const row = await db.get(
-      `SELECT ${conversationJson} AS json, cm.last_read_seq, cm.role, cm.muted,
+      `SELECT ${conversationJson} AS json, cm.last_read_seq, cm.role, cm.muted, cm.notify,
          (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.seq > cm.last_read_seq AND m.author_id IS NOT ? AND m.deleted_at IS NULL) AS unread,
          (SELECT COUNT(*) FROM message_mentions mm WHERE mm.user_id = ? AND mm.conversation_id = c.id AND mm.seq > cm.last_read_seq) AS mentions
        FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = ? WHERE c.id = ? AND c.org_id = ?`,
       [user.id, user.id, user.id, conversationId, org.id]
     );
-    return row ? { ...JSON.parse(row.json), last_read_seq: row.last_read_seq, my_role: row.role, muted: !!row.muted, unread: row.unread, mentions: row.mentions } : null;
+    return row ? { ...JSON.parse(row.json), last_read_seq: row.last_read_seq, my_role: row.role, muted: !!row.muted, notify: notifyLevel(JSON.parse(row.json), row), unread: row.unread, mentions: row.mentions } : null;
   }
 
   // Users the caller may address: everyone active in the org, except for
@@ -144,21 +153,6 @@ export function createChat({ db, events, audit, policies }) {
     events.notify();
     const created = await db.get('SELECT id FROM conversations WHERE org_id = ? AND dm_key = ?', [org.id, key]);
     return one(org, created.id, user);
-  }
-
-  async function createGroup(org, user, role, { memberIds = [], name = '' }) {
-    const ids = [...new Set(memberIds)].filter((id) => id !== user.id).slice(0, 100);
-    if (ids.length < 1) throw appError('invalid', 'Pick at least one person', { field: 'members' });
-    await assertMembers(org, user, role, ids);
-    const id = newId();
-    const at = nowIso();
-    await db.batch([
-      ['INSERT INTO conversations (id, org_id, type, name, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)', [id, org.id, 'group', String(name).trim().slice(0, 80) || null, user.id, at]],
-      ...memberRows(id, [user.id, ...ids], at),
-      events.statement({ orgId: org.id, conversationId: id, type: 'conversation.created', data: { id } }),
-    ]);
-    events.notify();
-    return one(org, id, user);
   }
 
   async function createSpace(org, user, role, { name, description = '', visibility = 'public', memberIds = [] }, ip) {
@@ -253,18 +247,34 @@ export function createChat({ db, events, audit, policies }) {
     events.notify();
   }
 
-  async function update(org, user, role, conversationId, { name, description }, ip) {
+  // Space settings (moderators, org owners/admins): name, description,
+  // visibility. Going public opens the whole history to anyone in the org
+  // who joins — the client warns before that.
+  async function update(org, user, role, conversationId, { name, description, visibility }, ip) {
     const conv = await requireConversation(org, user, conversationId);
     if (conv.type === 'dm') throw appError('invalid', 'Direct messages have no name');
     if (conv.type === 'space' && !canModerate(conv, role)) throw appError('forbidden', 'Only moderators can edit a Space');
     const nextName = name === undefined ? conv.name : String(name).trim().slice(0, 80) || (conv.type === 'space' ? conv.name : null);
     const nextDescription = description === undefined ? conv.description : String(description).trim().slice(0, 500);
+    const nextVisibility = conv.type === 'space' && ['public', 'private'].includes(visibility) ? visibility : conv.visibility;
+    const changes = {};
+    if (nextName !== conv.name) changes.name = { from: conv.name, to: nextName };
+    if (nextDescription !== conv.description) changes.description = true;
+    if (nextVisibility !== conv.visibility) changes.visibility = { from: conv.visibility, to: nextVisibility };
     await db.batch([
-      ['UPDATE conversations SET name = ?, description = ? WHERE id = ?', [nextName, nextDescription, conv.id]],
-      events.statement({ orgId: org.id, conversationId: conv.id, type: 'conversation.updated', data: { id: conv.id, name: nextName, description: nextDescription } }),
-      audit.statement({ orgId: org.id, actor: user, action: 'conversation.update', resourceType: conv.type, resourceId: conv.id, ip }),
+      ['UPDATE conversations SET name = ?, description = ?, visibility = ? WHERE id = ?', [nextName, nextDescription, nextVisibility, conv.id]],
+      events.statement({ orgId: org.id, conversationId: conv.id, type: 'conversation.updated', data: { id: conv.id, name: nextName, description: nextDescription, visibility: nextVisibility } }),
+      audit.statement({ orgId: org.id, actor: user, action: 'conversation.update', resourceType: conv.type, resourceId: conv.id, ip, data: changes }),
     ]);
     events.notify();
+  }
+
+  // Archiving from the Space itself (moderators, owners/admins): read-only
+  // and out of everyone's list; un-archiving stays in the admin console.
+  async function archiveOwn(org, user, role, conversationId, ip) {
+    const conv = await requireConversation(org, user, conversationId);
+    if (conv.type !== 'space' || !canModerate(conv, role)) throw appError('forbidden', 'Only moderators can archive a Space');
+    await archiveSpace(org, user, conv.id, true, ip);
   }
 
   async function archiveSpace(org, actor, spaceId, archived, ip) {
@@ -499,9 +509,23 @@ export function createChat({ db, events, audit, policies }) {
     if (res.changes) events.notify();
   }
 
-  async function setMuted(org, user, conversationId, muted) {
+  async function setNotify(org, user, conversationId, level) {
     await requireConversation(org, user, conversationId);
-    await db.run('UPDATE conversation_members SET muted = ? WHERE conversation_id = ? AND user_id = ?', [muted ? 1 : 0, conversationId, user.id]);
+    const value = ['all', 'mentions', 'none'].includes(level) ? level : null;
+    await db.run('UPDATE conversation_members SET notify = ?, muted = ? WHERE conversation_id = ? AND user_id = ?', [value, value === 'none' ? 1 : 0, conversationId, user.id]);
+  }
+  const setMuted = (org, user, conversationId, muted) => setNotify(org, user, conversationId, muted ? 'none' : null);
+
+  // Who is notified of a message in a conversation, by their level: the
+  // ids with 'all', and those who want at least their mentions.
+  async function notifyTargets(conversationId) {
+    const rows = await db.all(
+      `SELECT cm.user_id, cm.notify, cm.muted, c.type, (SELECT COUNT(*) FROM conversation_members x WHERE x.conversation_id = c.id) AS member_count
+       FROM conversation_members cm JOIN conversations c ON c.id = cm.conversation_id WHERE cm.conversation_id = ?`,
+      [conversationId]
+    );
+    const levels = new Map(rows.map((r) => [r.user_id, notifyLevel(r, r)]));
+    return { all: [...levels].filter(([, l]) => l === 'all').map(([id]) => id), quiet: [...levels].filter(([, l]) => l === 'none').map(([id]) => id) };
   }
 
   // Full-text search (FTS5) limited to conversations the caller belongs to,
@@ -539,7 +563,6 @@ export function createChat({ db, events, audit, policies }) {
     one,
     directory,
     openDm,
-    createGroup,
     createSpace,
     browseSpaces,
     joinSpace,
@@ -549,6 +572,7 @@ export function createChat({ db, events, audit, policies }) {
     setMemberRole,
     update,
     archiveSpace,
+    archiveOwn,
     allSpaces,
     history,
     send,
@@ -559,6 +583,8 @@ export function createChat({ db, events, audit, policies }) {
     pinned,
     markRead,
     setMuted,
+    setNotify,
+    notifyTargets,
     search,
     isAdminRole,
   };
