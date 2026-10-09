@@ -407,3 +407,9 @@
 .tile.presenting .tile-avatar { display: flex; }
 .presenting-ic { width: 2.4rem; height: 2.4rem; opacity: .85; }
 .space-help { padding: .65rem .8rem; margin-top: .6rem; border: 1px solid var(--bs-border-color); border-radius: .6rem; }
+/* Dialogs with a form: the form sits between .modal-content and the
+   header/body/footer, so it must pass the flex layout on — otherwise the
+   scrollable dialog cannot limit the body and long content runs off the
+   screen without a scrollbar. */
+.modal-dialog-scrollable .modal-form { display: flex; flex-direction: column; min-height: 0; max-height: 100%; overflow: hidden; }
+.modal-dialog-scrollable .modal-form > .modal-body { overflow-y: auto; }
