@@ -16,6 +16,8 @@ export function loadConfig(env = process.env) {
     cookieSecure: env.COOKIE_SECURE === '1',
     // Sessions end this long after their last use (30 days).
     sessionTtlHours: Number(env.SESSION_TTL_HOURS) || 720,
+    // How often a ringing call's push notification is sent again (tests: short).
+    callReRingMs: Number(env.CALL_RERING_MS) || 6000,
     dev: env.NODE_ENV === 'development',
     // Key for TOTP secrets and OTP HMACs. Unset → generated once into
     // appSecretFile (keep it outside the release directory on servers).

@@ -35,6 +35,7 @@ async function onPush(d) {
     badge: BADGE,
     timestamp: Date.now(),
     requireInteraction: call,
+    silent: false,
     vibrate: call ? [500, 250, 500, 250, 500] : [120],
     actions: call && d.actions ? [{ action: 'accept', title: d.actions.accept }, { action: 'decline', title: d.actions.decline }] : [],
     data: d,

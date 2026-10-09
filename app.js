@@ -68,7 +68,7 @@ export async function createApp(config, { quiet = false } = {}) {
   const notifier = createNotifier({ db, mailer, policies, config, isOnline, isWatching, push, chat });
   const rooms = createRooms({ auth, orgs, meetings, media, chat, users, notifier });
   realtime = createRealtime({ config, auth, orgs, chat, events, rooms, notifier });
-  const calls = createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline, isWatching, push });
+  const calls = createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline, isWatching, push, reRingMs: config.callReRingMs });
   // Durable events go to the chat sockets, and conversation messages also
   // to the rooms of meetings started from that conversation (in-call chat).
   const deliver = async (event) => {
