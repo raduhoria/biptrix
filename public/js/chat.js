@@ -1963,6 +1963,10 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+// Tapping Send must not take the focus from the text box: on phones that
+// closes the keyboard after every message. (The click still sends.)
+for (const ev of ['pointerdown', 'mousedown']) document.addEventListener(ev, (e) => e.target.closest?.('.composer .btn-send') && e.preventDefault());
+
 document.addEventListener('submit', (e) => {
   const form = e.target.closest('.composer');
   if (form) {
