@@ -133,6 +133,8 @@ export function createOrgs({ db, users, audit, events }) {
     const guard = `EXISTS (SELECT 1 FROM memberships WHERE org_id = ? AND user_id = ? AND ${cond})`;
     const guardArgs = [orgId, userId, ...condArgs];
     const ev = events.statement({ orgId, userId, type: 'conversation.removed', data: { all: true } });
+    // Everyone else in the org: drop the person from People and pickers now.
+    const gone = events.statement({ orgId, type: 'member.removed', data: { user_id: userId } });
     return [
       [`DELETE FROM conversation_members WHERE user_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE org_id = ?) AND ${guard}`, [userId, orgId, ...guardArgs]],
       [
@@ -140,6 +142,7 @@ export function createOrgs({ db, users, audit, events }) {
         [at, userId, orgId, ...guardArgs],
       ],
       [ev[0].replace(/VALUES \(([^)]*)\)$/s, `SELECT $1 WHERE ${guard}`), [...ev[1], ...guardArgs]],
+      [gone[0].replace(/VALUES \(([^)]*)\)$/s, `SELECT $1 WHERE ${guard}`), [...gone[1], ...guardArgs]],
       audit.statement({ orgId, actor, action, resourceType: 'user', resourceId: userId, ip }, guard, guardArgs),
       [`UPDATE memberships SET status = 'revoked', updated_at = ? WHERE org_id = ? AND user_id = ? AND ${cond}`, [at, orgId, userId, ...condArgs]],
     ];

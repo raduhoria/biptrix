@@ -204,6 +204,12 @@ function handle(msg) {
     case 'presence':
       state.presence[d.user_id] = d.status;
       return renderPresence(d.user_id);
+    case 'member.removed':
+      // Removed from the organization or access expired: gone from People
+      // and every picker at once.
+      state.directory.delete(d.user_id);
+      delete state.presence[d.user_id];
+      return renderPresence(d.user_id);
     case 'call.ring':
       return onRing(d);
     case 'call.stop':

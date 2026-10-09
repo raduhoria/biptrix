@@ -89,21 +89,24 @@ export function createChat({ db, events, audit, policies }) {
   // Users the caller may address: everyone active in the org, except for
   // external collaborators, who only see people they already share a
   // conversation with.
+  // (Only current access: a collaborator whose access expired is gone at
+  // once, before the maintenance sweep revokes the membership.)
   async function directory(org, user, role) {
+    const current = "m.status = 'active' AND (m.access_expires_at IS NULL OR m.access_expires_at > ?) AND u.status = 'active'";
     if (can(role, 'directory')) {
       return db.all(
         `SELECT u.id, u.name, u.email, m.role, m.title, m.department FROM memberships m JOIN users u ON u.id = m.user_id
-         WHERE m.org_id = ? AND m.status = 'active' AND u.status = 'active' ORDER BY u.name COLLATE NOCASE`,
-        [org.id]
+         WHERE m.org_id = ? AND ${current} ORDER BY u.name COLLATE NOCASE`,
+        [org.id, nowIso()]
       );
     }
     return db.all(
       `SELECT DISTINCT u.id, u.name, u.email, m.role, m.title, m.department FROM conversation_members a
        JOIN conversations c ON c.id = a.conversation_id AND c.org_id = ?
        JOIN conversation_members b ON b.conversation_id = a.conversation_id
-       JOIN users u ON u.id = b.user_id JOIN memberships m ON m.user_id = u.id AND m.org_id = c.org_id AND m.status = 'active'
-       WHERE a.user_id = ? ORDER BY u.name COLLATE NOCASE`,
-      [org.id, user.id]
+       JOIN users u ON u.id = b.user_id JOIN memberships m ON m.user_id = u.id AND m.org_id = c.org_id
+       WHERE a.user_id = ? AND ${current} ORDER BY u.name COLLATE NOCASE`,
+      [org.id, user.id, nowIso()]
     );
   }
 
