@@ -1,4 +1,5 @@
 import { $, $$, EMOJI, api, debounce, esc, hue, icon, initials, randomId, renderMarkdown, toast, translator } from './lib.js';
+import { enablePush, needsInstall, pushSupported, refreshPush } from './push.js';
 
 // Chat client for /o/:org. State lives in plain Maps; the DOM is re-rendered
 // per region (sidebar lists, message list, panel). Durable updates arrive as
@@ -116,6 +117,7 @@ const socket = (() => {
         waiting.get(msg.re)(msg);
         waiting.delete(msg.re);
       }
+      if (msg.type === 'hello') reportVisible();
       if (msg.type === 'system.sync') return onSync(msg.data);
       if (msg.event_id && syncing) return buffered.push(msg);
       handle(msg);
@@ -278,6 +280,9 @@ function renderSidebar() {
   const spaces = list.filter((c) => c.type === 'space');
   $('#list-direct').innerHTML = direct.map(item).join('') || `<li class="side-empty">${esc(t('noDirect'))}</li>`;
   $('#list-spaces').innerHTML = spaces.map(item).join('') || `<li class="side-empty">${esc(t('noSpaces'))}</li>`;
+  // Unread total on the installed app's icon.
+  const unreadTotal = list.reduce((n, c) => n + (c.muted ? 0 : c.unread || 0), 0);
+  if (navigator.setAppBadge) (unreadTotal ? navigator.setAppBadge(unreadTotal) : navigator.clearAppBadge()).catch(() => {});
   const total = list.reduce((n, c) => n + (c.id === state.current && isVisible() ? 0 : c.unread || 0), 0);
   document.title = `${total ? `(${total}) ` : ''}${ORG.name}`;
 }
@@ -500,7 +505,7 @@ function onRing(d) {
   ringing.timer = setTimeout(stopRinging, left);
   ringing.audio = ringTone();
   navigator.vibrate?.([400, 200, 400]);
-  if ('Notification' in window && Notification.permission === 'granted' && !isVisible()) {
+  if (!state.pushActive && 'Notification' in window && Notification.permission === 'granted' && !isVisible()) {
     ringing.notification = new Notification(t('callIncoming', { name }), { body: t(d.kind === 'audio' ? 'incomingAudio' : 'incomingVideo'), tag: `call-${d.meeting_id}`, icon: '/favicon.svg', requireInteraction: true });
     ringing.notification.onclick = () => window.focus();
   }
@@ -761,7 +766,8 @@ const markRead = debounce(() => {
 // ------------------------------------------------------------ notifications
 
 function notify(c, m) {
-  if (!('Notification' in window) || Notification.permission !== 'granted' || isVisible()) return;
+  // With push on this device, the service worker shows it (no duplicate).
+  if (state.pushActive || !('Notification' in window) || Notification.permission !== 'granted' || isVisible()) return;
   const n = new Notification(m.kind === 'meeting' ? t('callIncoming', { name: person(m.author_id).name }) : `${person(m.author_id).name} · ${convName(c)}`, {
     body: m.kind === 'meeting' ? m.body : m.body.replace(/<@([A-Za-z0-9_-]+)>/g, (x, id) => `@${person(id).name}`).slice(0, 140),
     tag: c.id,
@@ -1852,6 +1858,38 @@ window.addEventListener('popstate', route);
 
 // ------------------------------------------------------------------- start
 
+// ------------------------------------------------------------ push / visible
+// The server sends push notifications only while the app is not on screen
+// in this organization, so the tab says when it is (visible and focused).
+function reportVisible() {
+  socket.send('client.visible', { visible: isVisible() });
+}
+for (const ev of ['visibilitychange', 'focus', 'blur']) (ev === 'visibilitychange' ? document : window).addEventListener(ev, reportVisible);
+
+// Offer notifications on this device once (dismissable); refresh silently
+// where they were already allowed. iPhone: only in the installed app.
+function renderPushBanner() {
+  const box = $('#push-banner');
+  const dismissed = localStorage.getItem('push.dismissed') === '1';
+  const offer = boot.push && pushSupported() && !state.pushActive && Notification.permission === 'default' && !dismissed;
+  const install = boot.push && needsInstall() && !dismissed;
+  box.hidden = !(offer || install);
+  if (box.hidden) return;
+  box.innerHTML = `<div class="small">${icon('bell')} ${esc(t(install ? 'pushInstallHint' : 'pushOffer'))}</div>
+    <div class="d-flex gap-2 mt-2">${install ? '' : `<button class="btn btn-primary btn-sm" data-push="enable">${esc(t('pushEnable'))}</button>`}
+    <button class="btn btn-link btn-sm p-0" data-push="dismiss">${esc(t('pushLater'))}</button></div>`;
+}
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-push]');
+  if (!btn) return;
+  if (btn.dataset.push === 'dismiss') localStorage.setItem('push.dismissed', '1');
+  else {
+    state.pushActive = await enablePush(boot.push).catch(() => false);
+    toast(t(state.pushActive ? 'pushOn' : 'pushBlocked'), state.pushActive ? 'success' : 'warning');
+  }
+  renderPushBanner();
+});
+
 (async () => {
   try {
     await loadAll();
@@ -1860,6 +1898,8 @@ window.addEventListener('popstate', route);
   }
   route();
   socket.connect();
+  state.pushActive = await refreshPush(boot.push);
+  renderPushBanner();
   // Outbox entries from before a reload are retried once connected; if the
   // socket never opens, fall back to HTTP after a few seconds.
   setTimeout(() => !socket.isOpen() && flushOutbox(), 5000);

@@ -5,6 +5,7 @@ import { createDb } from './db/connection.js';
 import { runMigrations } from './db/migrate.js';
 import { createAudit } from './core/audit.js';
 import { createCalls } from './core/calls.js';
+import { createPush } from './core/push.js';
 import { createAuth } from './core/auth.js';
 import { createChat } from './core/chat.js';
 import { createEvents } from './core/events.js';
@@ -31,6 +32,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerChatRoutes } from './routes/chat.js';
 import { registerMeetingRoutes } from './routes/meetings.js';
 import { registerPlatformRoutes } from './routes/platform.js';
+import { registerPushRoutes } from './routes/push.js';
 import { registerStatic } from './routes/static.js';
 
 const MAINTENANCE_MS = 10 * 60_000;
@@ -59,10 +61,12 @@ export async function createApp(config, { quiet = false } = {}) {
   const loginCodes = createLoginCodes({ db, secret: appSecret });
   let realtime = null;
   const isOnline = (orgId, userId) => realtime.isOnline(orgId, userId);
-  const notifier = createNotifier({ db, mailer, policies, config, isOnline });
+  const isWatching = (orgId, userId) => realtime.isWatching(orgId, userId);
+  const push = createPush({ db, config });
+  const notifier = createNotifier({ db, mailer, policies, config, isOnline, isWatching, push });
   const rooms = createRooms({ auth, orgs, meetings, media, chat, users, notifier });
   realtime = createRealtime({ config, auth, orgs, chat, events, rooms, notifier });
-  const calls = createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline });
+  const calls = createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline, isWatching, push });
   // Durable events go to the chat sockets, and conversation messages also
   // to the rooms of meetings started from that conversation (in-call chat).
   const deliver = async (event) => {
@@ -92,12 +96,13 @@ export async function createApp(config, { quiet = false } = {}) {
 
   const router = createRouter({ onError });
   registerStatic(router, path.join(import.meta.dirname, 'public'), { dev: config.dev });
-  const deps = { calls, db, config, loginCodes, auth, users, orgs, policies, events, chat, files, meetings, media, mailer, rooms, realtime, notifier, audit, secretBox, health };
+  const deps = { push, calls, db, config, loginCodes, auth, users, orgs, policies, events, chat, files, meetings, media, mailer, rooms, realtime, notifier, audit, secretBox, health };
   registerAuthRoutes(router, deps);
   registerChatRoutes(router, deps);
   registerMeetingRoutes(router, deps);
   registerAdminRoutes(router, deps);
   registerPlatformRoutes(router, deps);
+  registerPushRoutes(router, deps);
 
   router.get('/healthz', (req, res) => res.json({ status: 'ok', node: config.nodeId }));
   router.get('/readyz', async (req, res) => {
@@ -142,6 +147,7 @@ export async function createApp(config, { quiet = false } = {}) {
     try {
       await auth.pruneExpired();
       await loginCodes.prune();
+      await push.prune();
       await calls.sweep();
       await meetings.closeExpired();
       for (const r of await orgs.expireCollaborators()) realtime.disconnectUser(r.user_id, r.org_id);

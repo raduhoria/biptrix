@@ -10,3 +10,8 @@ document.addEventListener('submit', (e) => {
   const msg = e.target.dataset?.confirm;
   if (msg && !confirm(msg)) e.preventDefault();
 });
+
+// <input data-autosubmit> submits its form when changed (switches).
+document.addEventListener('change', (e) => {
+  if (e.target.matches?.('[data-autosubmit]')) e.target.form.requestSubmit();
+});

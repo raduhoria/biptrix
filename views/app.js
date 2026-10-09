@@ -30,6 +30,8 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
     locale: t.locale,
     strings: t.client(),
     maxUploadMb: Math.round(config.maxUploadBytes / 1048576),
+    // Web Push: the server's public key ('' when push is not configured).
+    push: config.push.publicKey && config.push.privateKey ? config.push.publicKey : '',
   };
 
   return page({
@@ -89,6 +91,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
     </div>
 
     <div class="side-scroll">
+      <div class="push-banner" id="push-banner" hidden></div>
       <button class="side-link" data-view="meetings">${icon('calendar')} <span>${e('client.meetings')}</span><span class="badge rounded-pill text-bg-danger ms-auto" id="live-count" hidden></span></button>
       <div class="side-section">
         <div class="side-label">${e('client.directMessages')}</div>

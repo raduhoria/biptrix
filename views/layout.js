@@ -46,6 +46,12 @@ function head(t, title) {
 <meta name="color-scheme" content="light dark">
 <title>${escapeHtml(title)} · ${escapeHtml(t('app.name'))}</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<meta name="theme-color" content="#4f46e5">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="BipTrix">
 <link rel="stylesheet" href="/vendor/bootstrap/bootstrap.min.css">
 <link rel="stylesheet" href="/css/app.css">
 <script src="/js/theme.js"></script>`;

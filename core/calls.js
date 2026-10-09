@@ -20,8 +20,39 @@ const MAX_RING = 20; // larger conversations get the meeting card, no ringing
 //              callees who were not connected, the meeting closed.
 // The deadline is a timer on this node, with the maintenance sweep as the
 // fallback after a restart.
-export function createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline }) {
+export function createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline, isWatching = () => false, push = null }) {
   const timers = new Map();
+
+  // Push to the callees' devices (the app may be closed): the ring, with
+  // answer/decline, until the deadline; then "over" or "missed", which
+  // replaces it (same tag and topic, so an undelivered ring is replaced too).
+  async function pushCall(org, meeting, userIds, kind, extra = {}) {
+    if (!push?.enabled) return;
+    const caller = extra.caller || (meeting.host_id && (await users.byId(meeting.host_id)));
+    for (const userId of userIds) {
+      if (kind === 'ring' && isWatching(org.id, userId)) continue;
+      const u = await users.byId(userId);
+      if (!u) continue;
+      const t = createTranslator(u.locale || 'en');
+      const base = { tag: `call-${meeting.id}`, meeting_id: meeting.id, url: `${config.appUrl}/o/${org.slug}/c/${meeting.conversation_id}` };
+      const payload =
+        kind === 'ring'
+          ? {
+              ...base,
+              type: 'call',
+              title: t('client.callIncoming', { name: caller?.name || '' }),
+              body: t(extra.callKind === 'audio' ? 'client.incomingAudio' : 'client.incomingVideo'),
+              accept_url: `${config.appUrl}/o/${org.slug}/meet/${meeting.id}?call=${extra.callKind}`,
+              decline_url: `${config.appUrl}/api/o/${org.slug}/meetings/${meeting.id}/ring`,
+              until: extra.until,
+              actions: { accept: t('client.callAccept'), decline: t('client.callDecline') },
+            }
+          : kind === 'missed'
+            ? { ...base, type: 'missed', title: t('client.callMissedFrom', { name: caller?.name || '' }), body: '' }
+            : { ...base, type: 'call-stop' };
+      push.toUser(userId, payload, { urgency: 'high', ttl: kind === 'ring' ? Math.ceil(RING_MS / 1000) : 3600, topic: `call-${meeting.id}` }).catch(() => {});
+    }
+  }
 
   const callees = async (meeting) => (await chat.memberIds(meeting.conversation_id)).filter((id) => id !== meeting.host_id);
 
@@ -36,6 +67,7 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
       ...targets.map((userId) => events.statement({ orgId: org.id, userId, type: 'call.ring', data })),
     ]);
     events.notify();
+    pushCall(org, meeting, targets, 'ring', { caller, callKind: kind, until }).catch(() => {});
     clearTimeout(timers.get(meeting.id));
     const timer = setTimeout(() => deadline(meeting.id).catch((err) => console.error('Call deadline failed:', err.message)), RING_MS + 500);
     timer.unref?.();
@@ -43,10 +75,15 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
     return targets;
   }
 
-  async function stopFor(orgId, meetingId, userIds) {
+  async function stopFor(orgId, meetingId, userIds, { pushed = true } = {}) {
     if (!userIds.length) return;
     await db.batch(userIds.map((userId) => events.statement({ orgId, userId, type: 'call.stop', data: { meeting_id: meetingId } })));
     events.notify();
+    if (pushed && push?.enabled) {
+      const meeting = await meetings.byId(meetingId);
+      const org = meeting && (await orgs.byId(orgId));
+      if (org) await pushCall(org, meeting, userIds, 'stop');
+    }
   }
 
   // A callee answered (joined the room) or declined, on any device.
@@ -85,7 +122,9 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
     const org = await orgs.byId(meeting.org_id);
     const caller = meeting.host_id && (await users.byId(meeting.host_id));
     const targets = await callees(meeting);
-    await stopFor(meeting.org_id, meeting.id, targets);
+    // (The devices get "missed" instead of a plain stop.)
+    await stopFor(meeting.org_id, meeting.id, targets, { pushed: false });
+    await pushCall(org, meeting, targets, 'missed', { caller });
     rooms.notifyRoom(meeting.id, 'call.missed', {});
     if (caller) {
       await chat
