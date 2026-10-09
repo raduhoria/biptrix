@@ -42,7 +42,7 @@ export function languageMenu(t, next) {
 
 function head(t, title) {
   return `<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="light dark">
 <title>${escapeHtml(title)} · ${escapeHtml(t('app.name'))}</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
