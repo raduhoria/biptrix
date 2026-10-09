@@ -634,6 +634,10 @@ $('#chat-form').addEventListener('submit', (e) => {
   sendChat(p);
 });
 
+// Tapping Send keeps the focus in the text box (on phones losing it closes
+// the keyboard after every message); the click still sends.
+for (const ev of ['pointerdown', 'mousedown']) $('#chat-form button').addEventListener(ev, (e) => e.preventDefault());
+
 $('#chat-form textarea').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
