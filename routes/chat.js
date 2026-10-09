@@ -1,3 +1,4 @@
+import { orgSender } from '../core/mailer.js';
 import { readJson } from '../core/router.js';
 import { appError, canonicalEmail, isEmail } from '../core/util.js';
 import { spaceInviteEmail } from '../views/emails.js';
@@ -140,6 +141,7 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
     const inv = await orgs.invite(req.org, { email, role: colleague ? 'member' : 'external', conversationId: space.id, accessDays: colleague ? null : policy.collaborator_access_days }, req.actor, req.ip);
     mailer.queue({
       to: email,
+      sender: orgSender(req.org),
       ...spaceInviteEmail({ t: req.t, org: req.org.name, inviter: req.user.name, space: space.name, url: `${config.appUrl}/invite/${inv.token}`, days: policy.collaborator_access_days, colleague }),
     });
     res.json({ status: 'invited', role: colleague ? 'member' : 'external' });

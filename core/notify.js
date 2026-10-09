@@ -1,5 +1,6 @@
 import { mentionEmail } from '../views/emails.js';
 import { createTranslator } from './i18n.js';
+import { orgSender } from './mailer.js';
 import { nowIso } from './util.js';
 
 const THROTTLE_MS = 10 * 60_000;
@@ -36,6 +37,7 @@ export function createNotifier({ db, mailer, policies, config, isOnline }) {
       const name = conversation.type === 'dm' ? t('email.directMessage') : conversation.name || t('email.group');
       mailer.queue({
         to: row.email,
+        sender: orgSender(org),
         ...mentionEmail({ t, org: org.name, author: author.name, conversation: name, preview, url: `${config.appUrl}/o/${org.slug}/c/${conversation.id}` }),
       });
     }

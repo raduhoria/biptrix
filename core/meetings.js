@@ -173,7 +173,7 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
     const inv = await db.get('SELECT * FROM meeting_invitations WHERE token_hash = ?', [sha256(String(token || ''))]);
     if (!inv) throw appError('not_found', 'Invitation not found');
     const meeting = await byId(inv.meeting_id);
-    const org = await db.get('SELECT id, name, slug, status FROM organizations WHERE id = ?', [inv.org_id]);
+    const org = await db.get('SELECT id, name, slug, status, email_from, email_from_name FROM organizations WHERE id = ?', [inv.org_id]);
     if (inv.revoked_at) throw appError('expired', 'Invitation revoked', { reason: 'revoked' });
     if (inv.expires_at < nowIso()) throw appError('expired', 'Invitation expired', { reason: 'expired' });
     if (!meeting || !isOpen(meeting)) throw appError('expired', 'Meeting ended', { reason: meeting?.state === 'canceled' ? 'canceled' : 'ended' });

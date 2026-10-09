@@ -1,7 +1,8 @@
+import { orgSender } from '../core/mailer.js';
 import { translateError } from '../core/i18n.js';
 import { readForm } from '../core/router.js';
-import { nowIso } from '../core/util.js';
-import { orgInviteEmail } from '../views/emails.js';
+import { canonicalEmail, isEmail, nowIso } from '../core/util.js';
+import { orgInviteEmail, testEmail } from '../views/emails.js';
 import { auditView, membersView, overviewView, policiesView, spacesView } from '../views/admin.js';
 
 // Organization console under /o/:org/admin. Requires an admin-level role and
@@ -37,17 +38,35 @@ export function registerAdminRoutes(router, { auth, orgs, chat, policies, audit,
     res.send(overviewView({ t: req.t, req, stats, ...flash(req) }));
   });
 
+  // Settings, including the organization's e-mail sender: an address of one
+  // of its company domains (policy), so no organization can send as another.
   router.post('/o/:org/admin/settings', ...gate('org.manage'), async (req, res) => {
     const form = await readForm(req);
     const name = String(form.get('name') || '').trim().slice(0, 80);
     const color = /^#[0-9a-f]{6}$/i.test(form.get('brand_color') || '') ? form.get('brand_color') : null;
+    const from = canonicalEmail(form.get('email_from'));
+    const fromName = String(form.get('email_from_name') || '').replace(/[\r\n"<>]/g, '').trim().slice(0, 80) || null;
+    if (from && !isEmail(from)) return res.redirect(`${base(req)}?error=reason_senderInvalid`);
+    if (from && !policies.isCompanyEmail(await policies.get(req.org.id), from)) return res.redirect(`${base(req)}?error=reason_senderDomain`);
     if (name) {
       await db.batch([
-        ['UPDATE organizations SET name = ?, brand_color = ?, updated_at = ? WHERE id = ?', [name, color, nowIso(), req.org.id]],
-        audit.statement({ orgId: req.org.id, actor: req.user, action: 'org.settings', resourceType: 'organization', resourceId: req.org.id, ip: req.ip, data: { name, brand_color: color } }),
+        ['UPDATE organizations SET name = ?, brand_color = ?, email_from = ?, email_from_name = ?, updated_at = ? WHERE id = ?', [name, color, from || null, from ? fromName : null, nowIso(), req.org.id]],
+        audit.statement({ orgId: req.org.id, actor: req.user, action: 'org.settings', resourceType: 'organization', resourceId: req.org.id, ip: req.ip, data: { name, brand_color: color, email_from: from || null, email_from_name: from ? fromName : null } }),
       ]);
     }
     res.redirect(`${base(req)}?notice=saved`);
+  });
+
+  // A test message from the organization's sender to the admin, sent now
+  // (not queued) so a relay refusal shows here.
+  router.post('/o/:org/admin/settings/test-email', ...gate('org.manage'), async (req, res) => {
+    try {
+      await mailer.send({ to: req.user.email, sender: orgSender(req.org), ...testEmail({ t: req.t, org: req.org.name, from: req.org.email_from || config.smtp.fromEmail }) });
+      res.redirect(`${base(req)}?notice=testEmailSent`);
+    } catch (err) {
+      console.error(`Test e-mail for ${req.org.slug} failed:`, err.message);
+      res.redirect(`${base(req)}?error=reason_testEmailFailed`);
+    }
   });
 
   // ---------------------------------------------------------------- members
@@ -60,7 +79,7 @@ export function registerAdminRoutes(router, { auth, orgs, chat, policies, audit,
     const form = await readForm(req);
     try {
       const inv = await orgs.invite(req.org, { email: form.get('email'), role: form.get('role') || 'member' }, req.actor, req.ip);
-      mailer.queue({ to: inv.email, ...orgInviteEmail({ t: req.t, org: req.org.name, inviter: req.user.name, role: form.get('role') || 'member', url: `${config.appUrl}/invite/${inv.token}` }) });
+      mailer.queue({ to: inv.email, sender: orgSender(req.org), ...orgInviteEmail({ t: req.t, org: req.org.name, inviter: req.user.name, role: form.get('role') || 'member', url: `${config.appUrl}/invite/${inv.token}` }) });
       res.redirect(`${base(req)}/members?notice=inviteSent`);
     } catch (err) {
       res.redirect(`${base(req)}/members?error=${errorKey(err)}`);

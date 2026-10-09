@@ -1,3 +1,4 @@
+import { orgSender } from '../core/mailer.js';
 import { INTL_LOCALE, createTranslator, translateError } from '../core/i18n.js';
 import { readForm, readJson } from '../core/router.js';
 import { can } from '../core/orgs.js';
@@ -19,6 +20,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     for (const g of tokens) {
       mailer.queue({
         to: g.email,
+        sender: orgSender(org),
         ...meetingInviteEmail({ t, org: org.name, inviter: inviter.name, title: meeting.title, when: whenText(t, meeting), url: `${config.appUrl}/join/${g.token}`, otp: JSON.parse(meeting.policy_snapshot).guest_otp_required }),
       });
     }
@@ -29,7 +31,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
       const u = await users.byId(id);
       if (!u) continue;
       const t = createTranslator(u.locale || 'en');
-      mailer.queue({ to: u.email, ...memberMeetingEmail({ t, org: org.name, inviter: inviter.name, title: meeting.title, when: whenText(t, meeting), url: `${config.appUrl}/o/${org.slug}/meet/${meeting.id}` }) });
+      mailer.queue({ to: u.email, sender: orgSender(org), ...memberMeetingEmail({ t, org: org.name, inviter: inviter.name, title: meeting.title, when: whenText(t, meeting), url: `${config.appUrl}/o/${org.slug}/meet/${meeting.id}` }) });
     }
   }
 
@@ -190,7 +192,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     if (!found) return;
     try {
       const code = await meetings.issueOtp(found.inv);
-      mailer.queue({ to: found.inv.email, ...otpEmail({ t: req.t, title: found.meeting.title, code }) });
+      mailer.queue({ to: found.inv.email, sender: orgSender(found.org), ...otpEmail({ t: req.t, title: found.meeting.title, code }) });
       res.send(guestJoinView({ t: req.t, token: req.params.token, ...found, step: 'code', notice: req.t('guest.codeSent', { email: found.inv.email }) }));
     } catch (err) {
       const message = err.details?.reason === 'wait' ? req.t('guest.wait', { seconds: err.details.seconds }) : translateError(req.t, err);
