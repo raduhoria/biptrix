@@ -1,4 +1,5 @@
 import { LOCALES } from '../core/i18n.js';
+import { qrSvg } from '../core/qr.js';
 import { alerts, authPage, escapeHtml, fmtDate, icon, page } from './layout.js';
 
 // Each language is named in itself, so anyone can find their own.
@@ -159,7 +160,10 @@ export function accountView({ t, user, orgs, sessions, currentHash, notice = '',
     : mfaSetup
       ? `<ol class="small ps-3">
            <li>${escapeHtml(t('account.mfaStep1'))}</li>
-           <li>${escapeHtml(t('account.mfaStep2'))}<div class="font-monospace fs-5 user-select-all bg-body-tertiary rounded p-2 my-2 text-break">${escapeHtml(mfaSetup.secret.match(/.{1,4}/g).join(' '))}</div>
+           <li>${escapeHtml(t('account.mfaScan'))}
+             <div class="mfa-qr my-2">${qrSvg(mfaSetup.uri, { label: t('account.mfaScan') })}</div>
+             <div class="small text-body-secondary">${escapeHtml(t('account.mfaStep2'))}</div>
+             <div class="font-monospace fs-5 user-select-all bg-body-tertiary rounded p-2 my-2 text-break">${escapeHtml(mfaSetup.secret.match(/.{1,4}/g).join(' '))}</div>
              <a class="small" href="${escapeHtml(mfaSetup.uri)}">${escapeHtml(t('account.mfaOpenApp'))}</a></li>
            <li>${escapeHtml(t('account.mfaStep3'))}</li>
          </ol>
