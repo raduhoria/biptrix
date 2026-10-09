@@ -1178,11 +1178,15 @@ function renderLocalTile() {
   video.srcObject = state.cam && state.local.video ? new MediaStream([state.local.video]) : null;
   localTile.classList.toggle('no-video', !(state.cam && state.local.video));
   $('.tile-mic', localTile).innerHTML = state.mic && state.local.audio ? '' : icon('mic-off');
+  // Your own share is not played back to you: a live preview of a screen
+  // that contains this window would film itself (an endless mirror) — for
+  // you and for everyone watching. A card says you are presenting instead.
   if (state.local.screen && !localScreenTile) {
-    localScreenTile = tileShell('self:screen', t('meet.yourScreen'), 'screen-tile self-screen');
-    const v = $('video', localScreenTile);
-    v.muted = true;
-    v.srcObject = new MediaStream([state.local.screen]);
+    localScreenTile = tileShell('self:screen', t('meet.yourScreen'), 'self-screen presenting no-video');
+    $('.tile-avatar', localScreenTile).innerHTML = `<div class="text-center px-3">${icon('screen', 'presenting-ic')}
+      <div class="fw-semibold mt-2">${esc(t('meet.presenting'))}</div>
+      <div class="small opacity-75 mb-3">${esc(t('meet.presentingHint'))}</div>
+      <button class="btn btn-danger btn-sm" data-action="screen">${esc(t('meet.stopPresenting'))}</button></div>`;
   } else if (!state.local.screen && localScreenTile) {
     localScreenTile.remove();
     localScreenTile = null;
@@ -1310,7 +1314,10 @@ async function toggleCam() {
 async function toggleScreen() {
   if (state.local.screen) return stopScreen();
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
+    // selfBrowserSurface: Chrome/Edge leave this tab out of the picker
+    // (sharing the call's own tab is the classic mirror); other browsers
+    // ignore the hint.
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, selfBrowserSurface: 'exclude', surfaceSwitching: 'include' });
     state.local.screen = stream.getVideoTracks()[0];
     // Text and code: keep the resolution, give up frame rate when bandwidth is short.
     state.local.screen.contentHint = 'detail';
