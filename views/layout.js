@@ -40,9 +40,12 @@ export function languageMenu(t, next) {
   </form>`;
 }
 
+// Viewport: no viewport-fit=cover, so the browser keeps pages clear of
+// notches and of Android's gesture bar itself (installed apps on Android
+// are drawn edge to edge otherwise, and the bottom controls went under it).
 function head(t, title) {
   return `<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <meta name="color-scheme" content="light dark">
 <title>${escapeHtml(title)} · ${escapeHtml(t('app.name'))}</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
