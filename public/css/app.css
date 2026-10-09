@@ -171,10 +171,7 @@
 .conv-ic { display: inline-flex; align-items: center; justify-content: center; width: 1.75rem; height: 1.75rem; border-radius: .45rem; flex-shrink: 0; }
 .conv-ic.space { background: rgba(var(--brand-rgb), .12); color: var(--brand); }
 .conv-ic.group { background: rgba(34, 197, 94, .14); color: #16a34a; }
-/* --safe-b: Android draws installed apps edge to edge (viewport-fit=cover),
-   under the gesture bar; the bottom rows keep clear of it. */
-:root { --safe-b: env(safe-area-inset-bottom, 0px); }
-.side-foot { display: flex; align-items: center; gap: .45rem; padding: .45rem .9rem calc(.45rem + var(--safe-b)); font-size: .75rem; color: var(--bs-secondary-color); border-top: 1px solid var(--bs-border-color); }
+.side-foot { display: flex; align-items: center; gap: .45rem; padding: .45rem .9rem; font-size: .75rem; color: var(--bs-secondary-color); border-top: 1px solid var(--bs-border-color); }
 .conn-dot { width: .5rem; height: .5rem; border-radius: 50%; background: #9ca3af; }
 .side-foot[data-state="online"] .conn-dot { background: #22c55e; }
 .side-foot[data-state="reconnecting"] .conn-dot, .side-foot[data-state="connecting"] .conn-dot { background: #f59e0b; animation: pulse 1s infinite; }
@@ -262,7 +259,7 @@
 .typing-dots i:nth-child(3) { animation-delay: .4s; }
 @keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
 
-.composer-wrap { padding: 0 1rem calc(1rem + var(--safe-b)); }
+.composer-wrap { padding: 0 1rem 1rem; }
 .composer { position: relative; }
 .composer-box { border: 1px solid var(--bs-border-color); border-radius: .9rem; background: var(--bs-body-bg); box-shadow: 0 1px 4px rgba(0, 0, 0, .04); transition: border-color .15s, box-shadow .15s; }
 .composer-box:focus-within { border-color: rgba(var(--brand-rgb), .55); box-shadow: 0 0 0 .2rem rgba(var(--brand-rgb), .12); }
@@ -311,7 +308,7 @@
 .meet[data-stage="prejoin"] .stage-prejoin, .meet[data-stage="lobby"] .stage-lobby, .meet[data-stage="ended"] .stage-ended { display: flex; align-items: center; justify-content: center; padding: 1rem; }
 .meet[data-stage="room"] .stage-room { display: flex; }
 .meet-bar { display: none; }
-.meet[data-stage="room"] .meet-bar { display: flex; align-items: center; justify-content: center; gap: .6rem; padding: .7rem 1rem calc(1rem + var(--safe-b)); position: relative; }
+.meet[data-stage="room"] .meet-bar { display: flex; align-items: center; justify-content: center; gap: .6rem; padding: .7rem 1rem 1rem; position: relative; }
 .prejoin { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); max-width: 980px; width: 100%; overflow: hidden; border: 0; border-radius: 1rem; }
 .prejoin-video { position: relative; background: #000; aspect-ratio: 16 / 10; }
 .prejoin-video video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
@@ -377,12 +374,12 @@
 @media (max-width: 760px) {
   .tiles.has-spotlight { grid-template-columns: minmax(0, 1fr); }
   .tiles.has-spotlight .tile.spotlight { grid-row: auto; position: static; height: 55vh; }
-  .meet-panel { position: fixed; inset: auto 0 0 0; width: auto; max-height: 60vh; margin: 0; padding-bottom: calc(1rem + var(--safe-b)); border-radius: 1rem 1rem 0 0; z-index: 40; }
+  .meet-panel { position: fixed; inset: auto 0 0 0; width: auto; max-height: 60vh; margin: 0; border-radius: 1rem 1rem 0 0; z-index: 40; }
   .tiles { --cols: 1 !important; }
   .ctrl { width: 2.55rem; height: 2.55rem; }
   .ctrl .ic { width: 1.2rem; height: 1.2rem; }
   /* The bar never widens the page: tighter, and "end for everyone" wraps. */
-  .meet[data-stage="room"] .meet-bar { flex-wrap: wrap; gap: .35rem; padding: .5rem .5rem calc(.8rem + var(--safe-b)); }
+  .meet[data-stage="room"] .meet-bar { flex-wrap: wrap; gap: .35rem; padding: .5rem .5rem .8rem; }
   .meet-bar [data-action="copy-link"] { display: none; }
   .ctrl-leave { width: 3.1rem; }
   .meet-panel { overflow-x: hidden; }
