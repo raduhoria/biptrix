@@ -105,10 +105,15 @@ export function createAuth({ db, users, config, secretBox }) {
     const user = await users.byId(session.user_id);
     if (!user || user.status !== 'active') return null;
     if (user.mfa_enabled && !session.mfa_ok && !allowPendingMfa) return null;
+    // Sliding expiry: a session in use lives on (sessionTtlHours after its
+    // last use), like a messaging app; one that still waits for MFA does not.
+    let renewed = false;
     if (Date.now() - Date.parse(session.last_seen_at) > TOUCH_EVERY_MS) {
-      db.run('UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?', [nowIso(), session.id_hash]).catch(() => {});
+      renewed = !user.mfa_enabled || !!session.mfa_ok;
+      const expires = renewed ? isoIn(config.sessionTtlHours * 3600_000) : session.expires_at;
+      db.run('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id_hash = ?', [nowIso(), expires, session.id_hash]).catch(() => {});
     }
-    return { session, user };
+    return { session, user, renewed };
   }
 
   async function destroySession(req, res) {
@@ -151,8 +156,11 @@ export function createAuth({ db, users, config, secretBox }) {
   // loadUser runs before every route: req.user / req.session, or null.
   // A password-verified session still waiting for its TOTP code only gets
   // req.pendingMfa (the /login/mfa page).
-  async function loadUser(req) {
-    const found = await sessionFromToken(readToken(req), { allowPendingMfa: true });
+  async function loadUser(req, res) {
+    const token = readToken(req);
+    const found = await sessionFromToken(token, { allowPendingMfa: true });
+    // The cookie follows the session's new expiry.
+    if (found?.renewed && res) res.cookie(cookieName(req.secure), token, { secure: req.secure, maxAgeSeconds: config.sessionTtlHours * 3600, sameSite: 'Lax' });
     const complete = found && (!found.user.mfa_enabled || found.session.mfa_ok);
     req.user = complete ? found.user : null;
     req.session = found?.session || null;

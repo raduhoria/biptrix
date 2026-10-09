@@ -22,7 +22,7 @@ import { createNotifier } from './core/notify.js';
 import { createOrgs } from './core/orgs.js';
 import { createPolicies } from './core/policies.js';
 import { createRealtime } from './core/realtime.js';
-import { createRouter, parseCookies } from './core/router.js';
+import { createRouter, decorateResponse, parseCookies } from './core/router.js';
 import { createSecretBox, loadAppSecret } from './core/secrets.js';
 import { createUsers } from './core/users.js';
 import { configureEmails } from './views/emails.js';
@@ -129,7 +129,7 @@ export async function createApp(config, { quiet = false } = {}) {
     }
     if (!isAsset(req.url.split('?')[0])) {
       try {
-        await auth.loadUser(req);
+        await auth.loadUser(req, decorateResponse(res));
       } catch (err) {
         console.error('Session lookup failed:', err.message);
         res.writeHead(503, { 'Content-Type': 'text/plain', 'Retry-After': '5' });

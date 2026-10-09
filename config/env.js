@@ -14,7 +14,8 @@ export function loadConfig(env = process.env) {
     appUrl: (env.APP_URL || `http://localhost:${port}`).replace(/\/+$/, ''),
     trustProxy: env.TRUST_PROXY === '1',
     cookieSecure: env.COOKIE_SECURE === '1',
-    sessionTtlHours: Number(env.SESSION_TTL_HOURS) || 72,
+    // Sessions end this long after their last use (30 days).
+    sessionTtlHours: Number(env.SESSION_TTL_HOURS) || 720,
     dev: env.NODE_ENV === 'development',
     // Key for TOTP secrets and OTP HMACs. Unset → generated once into
     // appSecretFile (keep it outside the release directory on servers).
