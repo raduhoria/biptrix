@@ -109,7 +109,9 @@
 }
 
 /* -------------------------------------------------------------- chat app */
-.app-body { height: 100vh; height: 100dvh; overflow: hidden; }
+/* --app-h: the visible height on iOS, where the on-screen keyboard does not
+   shrink the page (chat.js); Android shrinks it (interactive-widget). */
+.app-body { height: 100vh; height: var(--app-h, 100dvh); overflow: hidden; }
 .app { display: grid; grid-template-columns: 64px 290px minmax(0, 1fr); height: 100%; }
 .app.with-panel { grid-template-columns: 64px 290px minmax(0, 1fr) 380px; }
 

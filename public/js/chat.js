@@ -2097,6 +2097,23 @@ $('#announcements').addEventListener('click', (e) => {
 // the server only sends those around today, so the list is fetched again.
 setInterval(refreshAnnouncements, 5 * 60_000);
 
+// On-screen keyboard. Android shrinks the page (interactive-widget in the
+// viewport meta); iOS Safari ignores that and instead scrolls the whole
+// page up, under the keyboard and out of the header. There the app takes
+// the height that is actually visible and stays at the top. Skipped while
+// pinch-zoomed, where the visible area is smaller for another reason.
+const vv = window.visualViewport;
+if (vv) {
+  const fit = () => {
+    if (vv.scale > 1.01) return;
+    document.documentElement.style.setProperty('--app-h', `${Math.round(vv.height)}px`);
+    if (window.scrollY || vv.offsetTop) window.scrollTo(0, 0);
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+  fit();
+}
+
 (async () => {
   try {
     await loadAll();
