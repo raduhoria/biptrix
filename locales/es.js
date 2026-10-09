@@ -572,6 +572,11 @@ export default {
       internal: 'Algo salió mal.',
     },
     meet: {
+      noise: 'Reducción de ruido',
+      noiseAi: 'Avanzada (IA)',
+      noiseStandard: 'Estándar (navegador)',
+      noiseOff: 'Desactivada',
+      noiseHelp: 'La avanzada elimina el tecleo, ventiladores, la calle y voces de fondo. Funciona en tu dispositivo; nada se envía a otro sitio.',
       settings: 'Ajustes',
       speaker: 'Altavoz',
       settingsHint: 'Los cambios se aplican al instante, sin salir de la llamada.',
