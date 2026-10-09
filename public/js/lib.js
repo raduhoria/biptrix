@@ -7,6 +7,24 @@ export function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
 
+// Full-screen pages (chat, call) take the height that is actually visible
+// (--app-h), not 100dvh: some Android phones count the gesture bar in 100dvh
+// for installed apps (the call's buttons went under it), and iOS Safari
+// does not shrink the page for the on-screen keyboard but scrolls it up,
+// out of the header. Skipped while pinch-zoomed.
+export function fitViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const fit = () => {
+    if (vv.scale > 1.01) return;
+    document.documentElement.style.setProperty('--app-h', `${Math.round(Math.min(vv.height, window.innerHeight))}px`);
+    if (window.scrollY || vv.offsetTop) window.scrollTo(0, 0);
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+  fit();
+}
+
 export const icon = (name, cls = '') => `<svg class="ic ${cls}" aria-hidden="true"><use href="/img/icons.svg#${name}"/></svg>`;
 
 export const initials = (name) =>
