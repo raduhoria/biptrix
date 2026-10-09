@@ -22,7 +22,7 @@ designed to be sold as SaaS or self-hosted.
 npm install
 cp .env.example .env      # optional; every value has a default
 npm run dev               # http://localhost:3000 → /setup on first run
-npm test                  # 38 tests: isolation, idempotency, catch-up, guests, MFA…
+npm test                  # 103 tests: isolation, idempotency, catch-up, guests, MFA, push…
 ```
 
 The first run asks you to create the platform operator account and the first
@@ -34,22 +34,27 @@ to the console.
 | Area | Content |
 |---|---|
 | Identity | Global users, organizations (tenants), memberships with roles: owner, admin, compliance, member, external. Platform operator role. |
-| Auth | scrypt passwords. Server-side sessions store only the cookie hash, with an `HttpOnly`/`SameSite` (and `__Host-`/`Secure` over HTTPS) cookie. Sign-in throttling. Password reset by e-mail. TOTP MFA, mandatory for the admin and operator consoles. |
+| Auth | scrypt passwords. Server-side sessions store only the cookie hash, with an `HttpOnly`/`SameSite` (and `__Host-`/`Secure` over HTTPS) cookie. Sessions slide: each use (at most every 5 minutes) extends them and their cookie, and they end `SESSION_TTL_HOURS` (720 = 30 days) after the last use; one still waiting for MFA is not extended. Sign-in throttling. Password reset by e-mail. TOTP MFA (setup shows a QR code), mandatory for the admin and operator consoles. |
 | Security | Authorization is checked server-side on every route and WebSocket frame. CSRF protection uses an Origin check. Origin is also checked on WebSocket upgrade. CSP and security headers are set. The standard error envelope is `{error:{code,message}}`. |
-| Chat | DMs and Spaces — called **groups** in the interface ("Space" stays the internal name: code, API, database). There is no separate group type: a Space does it all. Spaces are public or private, with moderators; their settings (name, description, visibility, with what each means) are editable after creation, and moderators can archive them. Per-person notifications per conversation: all, mentions only, none (default: all in DMs and Spaces of up to 20 people, mentions above). Markdown, mentions, reactions, threads, edit with `version` (`stale_version`), delete, pin, unread and mention counters, read receipts, typing, presence. |
+| Chat | DMs and Spaces — called **groups** in the interface ("Space" stays the internal name: code, API, database). There is no separate group type: a Space does it all. Spaces are public or private, with moderators; their settings (name, description, visibility, with what each means) are editable after creation, and moderators can archive them. Per-person notifications per conversation: all, mentions only, none (default: all in DMs and Spaces of up to 20 people, mentions above). Markdown, mentions, reactions, threads, edit with `version` (`stale_version`), delete, pin, unread and mention counters, read receipts, typing, presence. **People**: the organization's members as a list (available first, search by name, e-mail, title, department; message or call from a row); external collaborators see only the people they share a conversation with. A profile card opens from any name, avatar or mention. |
+| Unread and sound | Per-conversation badges (red with @ for mentions); on phones the back arrow counts what waits in the other conversations; the browser tab's icon gets a red count and the title "(n)"; the installed app's icon shows the unread total, also while closed (message pushes carry it; where the platform supports icon counts: Chrome/Edge on Windows and macOS, iOS home-screen apps). A short WebAudio sound, "Picătură" (a drop), for what would notify, while the app is open: not for the conversation on screen, not in "do not disturb", not when a push notification shows it instead; switched off per device from the status menu. |
+| Announcements | Owners and admins publish company announcements (title, optional text with bold/italic/links, type: information, important, good news) for a period of calendar days, last day included. Members see the active ones pinned in the sidebar, live (publish, edit, delete reach open pages at once), with "More" for long text; days follow each viewer's own date. Anyone can hide one on their device (it comes back when edited). External collaborators see none. Audited. |
 | Delivery | Each conversation has a `seq`. Sends are idempotent on `client_message_id`. The ACK `persisted` is sent only after commit. A durable event log (`events`) has a monotonic `event_id`. Clients catch up with `system.sync {since}`. The browser keeps a local outbox for offline sends. |
 | Files | Uploads are streamed with an extension allowlist and magic-byte checks. Optional antivirus (`AV_SCAN_CMD`), quotas, opaque ids, storage outside the webroot, and authorized download. |
 | Search | FTS5 that ignores diacritics. Scoped to the caller's conversations. Filters: conversation, author, date. Also searches file names. |
-| Meetings | Instant or scheduled meetings, and calls from a DM or Space (posted as a card in the conversation). WebRTC mesh with lobby, host/co-host, admit, remove, end for all, screen share, device selection, active speaker. |
-| Calls | Audio or video call from a DM or a Space of up to 20 people: every tab and device of the others rings (incoming-call screen, ring tone, answer/decline) for 45 s. Answered, declined, or missed: a "missed call" line in the conversation, an e-mail if they were offline. Bigger Spaces get the card only, no ringing; nobody with notifications off is rung. |
+| Meetings | Instant or scheduled meetings, and calls from a DM or Space (posted as a card in the conversation). WebRTC mesh with lobby, host/co-host, admit, remove, end for all, screen share, active speaker. Microphone, camera and speaker can be changed during a call; optional AI noise suppression (RNNoise, WebAssembly, in the browser). Full screen per tile; shared screens keep their resolution. Each tile shows its connection (P2P, P2P · TURN, SFU), bitrate and latency. The header shows whether the call is **end-to-end encrypted** (green lock: peer to peer, directly or through TURN) or goes **through the media server** (amber shield: above `MESH_MAX_PARTICIPANTS`, via the SFU), live, with an explanation on tap. Calls survive dropped sockets and server restarts. |
+| Calls | Audio or video call from a DM or a Space of up to 20 people: every tab and device of the others rings (incoming-call screen, ring tone, answer/decline) for 45 s. A push notification sounds once, so on a closed app the call is pushed again every 6 s (`CALL_RERING_MS`) until it is answered, declined, missed or over. Answered, declined, or missed: a "missed call" line in the conversation, an e-mail if they were offline. Bigger Spaces get the card only, no ringing; nobody with notifications off is rung. |
 | Push notifications | Web Push (VAPID, RFC 8291 encryption, `node:crypto` only): direct messages, Space messages by each person's level, mentions, calls (answer/decline in the notification) and missed calls reach phones and computers with the app closed, unless the app is on screen. Installable app (manifest, service worker); on iPhone it works from the home-screen app. Each device subscription belongs to its session (signing out stops it); Contul meu lists devices, sends a test, and can hide message text. Keys: `node scripts/vapid-keys.js` → `VAPID_*` in the environment. |
 | In-call chat | A call from a conversation chats in that conversation (its members only; the messages stay there). Other meetings have their own chat, shared with admitted guests, with history for late joiners and subject to message retention. |
 | External guests | A personal link (only the token hash is stored) leads to an e-mailed OTP (rate limited, attempts counted), then a guest session bound to the meeting, then the lobby. Revoking or ending the meeting closes the sessions and the sockets. |
-| External collaborators | Space moderators (or admins only, per policy) invite people from other companies by e-mail straight into a Space. They get the `external` role with access that expires after N days (90 by default). They see only the conversations shared with them: no directory, no browsing, cannot create Spaces. Each person shows an "external · domain" badge, and a Space that contains them shows a banner. Access can be extended or revoked from the admin console. |
+| External collaborators | Space moderators (or admins only, per policy) invite people from other companies by e-mail straight into a Space (someone with an address in the organization's company domains joins as a member instead). They get the `external` role with access that expires after N days (90 by default). They see only the conversations shared with them: no directory, no browsing, cannot create Spaces. Each person shows an "external · domain" badge, and a Space that contains them shows a banner. Access can be extended or revoked from the admin console (policy duration 0 = no expiry; "Extend" then removes the limit). Expired collaborators leave People and every picker at once. They can call within their conversations. |
 | Passwordless sign-in | A 6-digit code sent by e-mail: stored as an HMAC, valid 10 minutes, single use, rate limited. MFA, when enabled, still follows. Accounts created from an invitation can have no password at all. |
+| E-mail | Branded templates. Per-organization sender (e.g. `no-reply@company.com`, must be in the organization's company domains; account mail keeps the platform sender), with a test e-mail. Notification e-mails (direct messages and mentions to someone offline) are informative only: who wrote and where, never the message text. |
 | Policies | Per organization and versioned: external invitations on/off, who may invite, allowed/blocked domains, OTP, lobby, guest screen share, daily limits, duration, participants, file size, retention, e-mail notifications. |
-| Administration | Organization console: members and invitations, roles, revocation (closes sockets), Spaces (archive), policies, audit. Operator console: tenants (create, suspend, limits), accounts (disable), health, platform audit. The operator has no access to tenant content. |
-| Operations | `/healthz`, `/readyz`. Usage counters per tenant and month. Hourly maintenance: expired sessions, the 7-day event window, orphan uploads, retention, WAL checkpoint. |
+| Administration | Organization console: members and invitations, roles, revocation (closes sockets), Spaces (archive), announcements, policies, audit. Usable on phones: the sections wrap, tables become stacked cards. Operator console: tenants (create, suspend, limits), accounts (disable), health, platform audit. The operator has no access to tenant content. |
+| Mobile | Installable app. The on-screen keyboard never pushes the page off screen: Android shrinks it (`interactive-widget=resizes-content`), and full-screen pages (chat, call) size themselves from the visible height (`lib.js` `fitViewport`, also for iOS Safari and Android phones whose `100dvh` includes the gesture bar). No `viewport-fit=cover`, so pages stay clear of the system bars. Message lists read at the bottom stay there when they resize; Send does not take the focus, so the keyboard stays open. |
+| Languages | English (default), Romanian, Spanish; chosen per user on the account page. |
+| Operations | `/healthz`, `/readyz`. Usage counters per tenant and month. Maintenance every 10 minutes: expired sessions, the 7-day event window, orphan uploads, retention, WAL checkpoint; collaborator expiry every minute. |
 
 ## Architecture
 
@@ -60,11 +65,13 @@ config/env.js        all configuration from environment variables
 db/connection.js     common async adapter: SQLite (node:sqlite, WAL) | rqlite (HTTP)
 db/schema.sql        schema (§13) + FTS5 + triggers; db/migrate.js versioned migrations
 core/                auth, orgs, policies, chat, events, realtime, meetings,
-                     meeting-rooms, calls, media, files, notify, audit, smtp, totp, i18n
-routes/              auth, chat (API), meetings (+ guest flow), admin, platform, static
+                     meeting-rooms, calls, media, sfu, files, notify, push, webpush,
+                     announcements, login-codes, mailer, smtp, totp, qr, audit, i18n
+routes/              auth, chat (API), meetings (+ guest flow), admin, platform, push, static
 views/               pages and e-mails (template literals)
-public/js            chat.js, meeting.js, lib.js, console.js, theme.js
-locales/             ro (default), en
+public/js            chat.js, meeting.js, lib.js, push.js, console.js, theme.js, noise-worklet.js
+public/sw.js         service worker: push notifications, app icon count (no offline cache)
+locales/             en (default), ro, es
 ```
 
 **Data.** The DB interface is `get / all / run / batch`, with `?` parameters.
@@ -74,9 +81,9 @@ SQLite, one `/db/execute?transaction` request on rqlite. Nothing relies on a
 
 **Real time across nodes.** Each change writes its event in the same batch.
 Delivery has one path: `events.pump()` reads the log after the last
-dispatched id. It runs right after a local write and, in cluster mode
-(`CLUSTER=1`), on a 400 ms timer, so events written by other nodes are picked
-up too. Clients recover anything lost through `system.sync`. Presence and
+dispatched id. It runs right after a local write and on a timer: 400 ms in
+cluster mode (`CLUSTER=1`), so events written by other nodes are picked up
+too, and 2 s on a single node, for writes from other processes (scripts). Clients recover anything lost through `system.sync`. Presence and
 typing are ephemeral and per node.
 
 **Meetings across nodes.** Rooms live in the memory of the node that holds the
@@ -132,6 +139,20 @@ parameter (consistent hash).
   screen share, camera off, leaving).
 - Cost (Oct 2026): SFU and TURN are $0.05/GB of egress, with the first
   1,000 GB/month free, shared between the two services.
+
+## Privacy
+
+- Messages, files and backups live only on our server (SQLite and `files/`
+  under `/var/lib/biptrix`). Administrators have no screen to read
+  conversations they are not in; the operator has no access to tenant content.
+- Messages are **not** end-to-end encrypted: whoever has root on the server
+  or a backup can read them (the disk itself is not encrypted).
+- Transport is always TLS. From the internet, `talk.altbetexchange.com` goes
+  through Cloudflare's proxy, which terminates TLS (it does not store
+  content); the internal DNS sends the office network straight to the host.
+- Notification e-mails never contain message text. Push payloads are
+  encrypted to the device (RFC 8291); each person can hide the text there too.
+- Calls: see the encryption badge (Meetings) and `media_sfu_allowed`.
 
 ## Not done yet (next phases)
 
