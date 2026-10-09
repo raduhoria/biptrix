@@ -46,6 +46,7 @@ const state = {
   mic: localStorage.getItem('meet.mic') !== '0',
   cam: localStorage.getItem('meet.cam') !== '0',
   devices: { mic: localStorage.getItem('meet.micId') || '', cam: localStorage.getItem('meet.camId') || '', spk: localStorage.getItem('meet.spkId') || '' },
+  noise: ['ai', 'standard', 'off'].includes(localStorage.getItem('meet.noise')) ? localStorage.getItem('meet.noise') : 'ai',
   joined: false,
   leaving: false,
   spotlight: true,
@@ -87,13 +88,71 @@ async function startCamera() {
 
 async function startMic() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: state.devices.mic ? { exact: state.devices.mic } : undefined, echoCancellation: true, noiseSuppression: true } });
-    state.local.audio = stream.getAudioTracks()[0];
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: state.devices.mic ? { exact: state.devices.mic } : undefined, echoCancellation: true, noiseSuppression: state.noise !== 'off', autoGainControl: true },
+    });
+    state.local.audioRaw = stream.getAudioTracks()[0];
+    state.local.audio = await noiseFilter(state.local.audioRaw);
     state.local.audio.enabled = state.mic;
   } catch (err) {
     state.mic = false;
     showMediaError(err);
   }
+}
+
+// ------------------------------------------------------- noise suppression
+// Settings → Noise reduction: 'ai' (default) runs RNNoise on the microphone
+// (public/js/noise-worklet.js) on top of the browser's own suppression —
+// keyboard, fans, street, background voices; 'standard' is the browser's
+// alone; 'off' turns both off. What the others hear is the filtered track.
+// Where it cannot run (no AudioWorklet, a 48 kHz context refused) the plain
+// microphone is used. A page opened without a click (a call tab) may not
+// start audio yet: the plain microphone goes out until the first click or
+// key, then the filtered one takes over without renegotiation.
+let noiseWasm = null;
+let noiseChain = null; // { ctx, node, track, stop }
+
+async function noiseFilter(raw) {
+  stopNoise();
+  if (state.noise !== 'ai' || !window.AudioWorkletNode) return raw;
+  try {
+    const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    noiseWasm ||= await (await fetch('/vendor/rnnoise/rnnoise.wasm')).arrayBuffer();
+    await ctx.audioWorklet.addModule('/js/noise-worklet.js');
+    const node = new AudioWorkletNode(ctx, 'rnnoise', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit', processorOptions: { wasm: noiseWasm } });
+    const dest = ctx.createMediaStreamDestination();
+    ctx.createMediaStreamSource(new MediaStream([raw])).connect(node).connect(dest);
+    const track = dest.stream.getAudioTracks()[0];
+    noiseChain = {
+      ctx,
+      track,
+      stop: () => {
+        node.port.postMessage('destroy');
+        ctx.close().catch(() => {});
+      },
+    };
+    await ctx.resume().catch(() => {});
+    if (ctx.state === 'running') return track;
+    const takeOver = async () => {
+      await ctx.resume().catch(() => {});
+      if (ctx.state !== 'running' || noiseChain?.ctx !== ctx || state.local.audioRaw !== raw) return;
+      track.enabled = state.mic;
+      state.local.audio = track;
+      pushTrack(SLOT.audio);
+      renderLocalTile();
+    };
+    for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, takeOver, { once: true });
+    return raw;
+  } catch (err) {
+    console.warn('Noise suppression unavailable, using the plain microphone:', err.message);
+    stopNoise();
+    return raw;
+  }
+}
+
+function stopNoise() {
+  noiseChain?.stop();
+  noiseChain = null;
 }
 
 function showMediaError(err) {
@@ -105,6 +164,11 @@ function showMediaError(err) {
 function stopTrack(kind) {
   state.local[kind]?.stop();
   state.local[kind] = null;
+  if (kind === 'audio') {
+    stopNoise();
+    state.local.audioRaw?.stop();
+    state.local.audioRaw = null;
+  }
 }
 
 async function listDevices() {
@@ -115,7 +179,7 @@ async function listDevices() {
     sel.innerHTML = list.map((d, i) => `<option value="${esc(d.deviceId)}"${d.deviceId === current ? ' selected' : ''}>${esc(d.label || `${kind} ${i + 1}`)}</option>`).join('') || `<option>—</option>`;
   };
   // The same choices before joining and in the call's settings tab.
-  for (const sel of $$('[data-device="mic"]')) fill(sel, 'audioinput', state.local.audio?.getSettings().deviceId || state.devices.mic);
+  for (const sel of $$('[data-device="mic"]')) fill(sel, 'audioinput', (state.local.audioRaw || state.local.audio)?.getSettings().deviceId || state.devices.mic);
   for (const sel of $$('[data-device="cam"]')) fill(sel, 'videoinput', state.local.video?.getSettings().deviceId || state.devices.cam);
   // Speaker choice: only where the browser can route audio (not Safari/iOS).
   const outputs = devices.filter((d) => d.kind === 'audiooutput');
@@ -134,10 +198,15 @@ function applySpeaker(el = null) {
 // Switching a device during the call replaces the track on the existing
 // connections (no renegotiation, nobody notices but the sound/picture).
 async function changeDevice(kind, id) {
-  state.devices[kind] = id;
-  localStorage.setItem(`meet.${kind}Id`, id);
+  if (kind === 'noise') {
+    state.noise = id;
+    localStorage.setItem('meet.noise', id);
+  } else {
+    state.devices[kind] = id;
+    localStorage.setItem(`meet.${kind}Id`, id);
+  }
   if (kind === 'spk') return applySpeaker();
-  if (kind === 'mic') {
+  if (kind === 'mic' || kind === 'noise') {
     stopTrack('audio');
     await startMic();
     pushTrack(SLOT.audio);
@@ -1430,6 +1499,7 @@ $('#invite-form')?.addEventListener('submit', async (e) => {
   }
 });
 
+$('#set-noise').value = state.noise;
 for (const sel of $$('[data-device]')) sel.addEventListener('change', (e) => changeDevice(e.target.dataset.device, e.target.value));
 // A headset plugged in or removed mid-call shows up in the lists.
 navigator.mediaDevices?.addEventListener?.('devicechange', () => listDevices().catch(() => {}));

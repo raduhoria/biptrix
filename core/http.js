@@ -16,7 +16,9 @@ export function isSecure(req, trustProxy) {
 // blocks, behavior only in /js/*.js files.
 const CSP = [
   "default-src 'self'",
-  "script-src 'self'",
+  // wasm-unsafe-eval: lets WebAssembly compile (noise suppression in
+  // calls); JavaScript eval stays forbidden.
+  "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "media-src 'self' blob:",

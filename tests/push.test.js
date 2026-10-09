@@ -215,4 +215,12 @@ describe('push notifications', () => {
     assert.equal(manifest.data.display, 'standalone');
     assert.ok(manifest.data.icons.some((i) => i.sizes === '512x512'));
   });
+
+  test('noise suppression assets: the WebAssembly is served and allowed to compile', async () => {
+    const res = await fetch(`${app.base}/vendor/rnnoise/rnnoise.wasm`);
+    assert.equal(res.headers.get('content-type'), 'application/wasm');
+    assert.match(res.headers.get('content-security-policy'), /script-src 'self' 'wasm-unsafe-eval'/);
+    assert.ok(WebAssembly.validate(new Uint8Array(await res.arrayBuffer())));
+    assert.equal((await fetch(`${app.base}/js/noise-worklet.js`)).status, 200);
+  });
 });

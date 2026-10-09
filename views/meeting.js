@@ -102,6 +102,13 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
         <div class="mic-meter mb-3"><span id="mic-level"></span></div>
         <label class="form-label small" for="set-cam">${e('client.meet.camera')}</label>
         <select class="form-select form-select-sm mb-3" id="set-cam" data-device="cam"></select>
+        <label class="form-label small" for="set-noise">${e('client.meet.noise')}</label>
+        <select class="form-select form-select-sm mb-1" id="set-noise" data-device="noise">
+          <option value="ai">${e('client.meet.noiseAi')}</option>
+          <option value="standard">${e('client.meet.noiseStandard')}</option>
+          <option value="off">${e('client.meet.noiseOff')}</option>
+        </select>
+        <div class="small opacity-75 mb-3">${e('client.meet.noiseHelp')}</div>
         <div id="set-spk-box">
           <label class="form-label small" for="set-spk">${e('client.meet.speaker')}</label>
           <select class="form-select form-select-sm mb-3" id="set-spk" data-device="spk"></select>

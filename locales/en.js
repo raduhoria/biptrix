@@ -572,6 +572,11 @@ export default {
       internal: 'Something went wrong.',
     },
     meet: {
+      noise: 'Noise reduction',
+      noiseAi: 'Advanced (AI)',
+      noiseStandard: 'Standard (browser)',
+      noiseOff: 'Off',
+      noiseHelp: 'Advanced removes typing, fans, street noise and background voices. It runs on your device; nothing is sent anywhere else.',
       settings: 'Settings',
       speaker: 'Speaker',
       settingsHint: 'Changes apply at once, without leaving the call.',

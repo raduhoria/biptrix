@@ -573,6 +573,11 @@ export default {
       internal: 'Eroare neașteptată.',
     },
     meet: {
+      noise: 'Reducere zgomot',
+      noiseAi: 'Avansată (AI)',
+      noiseStandard: 'Standard (browser)',
+      noiseOff: 'Oprită',
+      noiseHelp: 'Avansată taie tastatura, ventilatorul, strada și vocile din fundal. Rulează pe dispozitivul tău; nimic nu pleacă în altă parte.',
       settings: 'Setări',
       speaker: 'Difuzor',
       settingsHint: 'Schimbările se aplică imediat, fără să ieși din apel.',
