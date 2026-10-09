@@ -3,7 +3,7 @@ import { alerts, authPage, escapeHtml, icon, jsonData, page } from './layout.js'
 // Meeting room (members at /o/:org/meet/:id, verified guests at /meet/:id).
 // Pre-join (preview, devices, name) → lobby → room; all driven by
 // public/js/meeting.js over /ws/meeting.
-export function meetingRoomView({ t, meeting, org, mode, displayName = '', canInvite = false, backHref, call = '', userId = null }) {
+export function meetingRoomView({ t, meeting, org, mode, displayName = '', canInvite = false, backHref, call = '', userId = null, meshMax = 6 }) {
   const e = (key, params) => escapeHtml(t(key, params));
   const boot = {
     meeting: { id: meeting.id, title: meeting.title, host_id: meeting.host_id, expires_at: meeting.expires_at },
@@ -14,6 +14,7 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
     backHref,
     call,
     userId,
+    meshMax,
     strings: t.client(),
   };
   const ctrl = (action, ic, label, extra = '') => `<button class="btn ctrl" data-action="${action}" title="${e(label)}" aria-label="${e(label)}" ${extra}>${icon(ic)}</button>`;
@@ -32,6 +33,7 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
     </div>
     <span class="badge text-bg-danger ms-2" id="rec-live" hidden>LIVE</span>
     <div class="ms-auto d-flex gap-2">
+      <button class="btn btn-sm sec-badge" type="button" data-action="security" id="sec-badge" hidden></button>
       <button class="btn btn-sm btn-outline-light" data-action="toggle-layout" title="${e('client.meet.layout')}">${icon('grid')}</button>
     </div>
   </header>
@@ -80,6 +82,7 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
 
   <section class="stage stage-room" id="stage-room">
     <div class="call-banner" id="call-banner" hidden></div>
+    <div class="sec-info" id="sec-info" role="status" hidden></div>
     <div class="tiles" id="tiles"></div>
     <aside class="meet-panel" id="meet-panel" data-tab="people" hidden>
       <header class="d-flex align-items-center gap-1 mb-2">
