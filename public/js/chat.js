@@ -2054,12 +2054,19 @@ function renderAnnouncements() {
     </div>`
     )
     .join('');
-  // "More" only where the text is cut off.
-  for (const el of $$('.ann', box)) {
+  annToggles();
+}
+
+// "More" only where the text is cut off. Measured again whenever the box
+// changes size: on phones the sidebar is hidden (nothing to measure) while
+// a conversation is open, and at start-up before the first view is chosen.
+function annToggles() {
+  for (const el of $$('.ann', $('#announcements'))) {
     const body = $('.ann-body', el);
-    if (body && body.scrollHeight > body.clientHeight + 1) $('[data-ann-toggle]', el).hidden = false;
+    if (body && body.clientHeight && !el.classList.contains('open')) $('[data-ann-toggle]', el).hidden = body.scrollHeight <= body.clientHeight + 1;
   }
 }
+new ResizeObserver(annToggles).observe($('#announcements'));
 
 async function refreshAnnouncements() {
   try {
