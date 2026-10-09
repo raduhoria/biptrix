@@ -112,7 +112,7 @@ export function membersView({ t, req, members, invites, notice, error, companyDo
       ${invites.length ? `<h3 class="h6 mt-4">${escapeHtml(t('admin.pendingInvites'))}</h3>${table([t('auth.email'), t('admin.role'), t('admin.expires'), ''], inviteRows, '')}` : ''}
     </div></section>
     <section class="card"><div class="card-body">
-      <form class="d-flex gap-2 mb-3" method="get"><input class="form-control" name="q" value="${escapeHtml(req.query.q || '')}" placeholder="${escapeHtml(t('admin.searchMembers'))}">
+      <form class="d-flex flex-wrap gap-2 mb-3" method="get"><input class="form-control filter-input" name="q" value="${escapeHtml(req.query.q || '')}" placeholder="${escapeHtml(t('admin.searchMembers'))}">
         <div class="form-check form-switch d-flex align-items-center gap-2 text-nowrap"><input class="form-check-input" type="checkbox" role="switch" id="all" name="all" value="1"${req.query.all ? ' checked' : ''}><label class="form-check-label" for="all">${escapeHtml(t('admin.showRevoked'))}</label></div>
         <button class="btn btn-outline-secondary">${escapeHtml(t('common.search'))}</button></form>
       ${table([t('admin.person'), t('admin.role'), 'MFA', t('admin.status'), t('admin.since'), ''], rows, t('admin.noMembers'))}

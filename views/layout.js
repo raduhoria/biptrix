@@ -123,10 +123,10 @@ export function consolePage({ t, title, user, org = null, nav, active, body, pat
     scripts: ['console.js', ...scripts],
     data,
     body: `<header class="console-top border-bottom">
-  <a class="brand" href="${org ? `/o/${escapeHtml(org.slug)}` : '/'}">${icon('logo', 'brand-logo')}<span>${escapeHtml(t('app.name'))}</span></a>
-  ${org ? `<span class="badge text-bg-light border ms-2">${escapeHtml(org.name)}</span>` : `<span class="badge text-bg-warning ms-2">${escapeHtml(t('platform.badge'))}</span>`}
-  <div class="ms-auto d-flex align-items-center gap-2">
-    ${org ? `<a class="btn btn-sm btn-outline-secondary" href="/o/${escapeHtml(org.slug)}">${icon('chat')} ${escapeHtml(t('nav.backToChat'))}</a>` : ''}
+  <a class="brand" href="${org ? `/o/${escapeHtml(org.slug)}` : '/'}">${icon('logo', 'brand-logo')}<span class="d-none d-sm-inline">${escapeHtml(t('app.name'))}</span></a>
+  ${org ? `<span class="badge text-bg-light border console-org">${escapeHtml(org.name)}</span>` : `<span class="badge text-bg-warning console-org">${escapeHtml(t('platform.badge'))}</span>`}
+  <div class="ms-auto d-flex align-items-center gap-2 flex-shrink-0">
+    ${org ? `<a class="btn btn-sm btn-outline-secondary" href="/o/${escapeHtml(org.slug)}" title="${escapeHtml(t('nav.backToChat'))}">${icon('chat')} <span class="d-none d-md-inline">${escapeHtml(t('nav.backToChat'))}</span></a>` : ''}
     <button class="btn btn-sm btn-outline-secondary theme-toggle" type="button" aria-label="${escapeHtml(t('nav.theme'))}">${icon('moon', 'only-light')}${icon('sun', 'only-dark')}</button>
     ${languageMenu(t, path)}
     <a class="btn btn-sm btn-outline-secondary" href="/account" title="${escapeHtml(user.email)}">${icon('user')} <span class="d-none d-md-inline">${escapeHtml(user.name)}</span></a>
@@ -144,9 +144,9 @@ export function consolePage({ t, title, user, org = null, nav, active, body, pat
 
 export function table(headers, rows, empty) {
   if (!rows.length) return `<div class="text-body-secondary py-4 text-center">${escapeHtml(empty)}</div>`;
-  return `<div class="table-responsive"><table class="table table-hover align-middle mb-0">
+  return `<div class="table-responsive"><table class="table table-hover align-middle mb-0 table-stack">
     <thead><tr>${headers.map((h) => `<th scope="col">${escapeHtml(h)}</th>`).join('')}</tr></thead>
-    <tbody>${rows.map((cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>
+    <tbody>${rows.map((cells) => `<tr>${cells.map((c, i) => `<td data-label="${escapeHtml(headers[i] || '')}">${c}</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div>`;
 }
 
