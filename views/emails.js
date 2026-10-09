@@ -251,14 +251,15 @@ export const resetEmail = ({ t, url }) =>
     outro: escapeHtml(t('email.resetOutro')),
   });
 
-export const mentionEmail = ({ t, org, author, conversation, preview, url }) =>
+// Only who wrote and where: the message itself stays in BipTrix (the mail
+// travels through the mail provider and stays in the inbox).
+export const mentionEmail = ({ t, org, author, conversation, url }) =>
   frame({
     t,
-    preheader: `${author}: ${preview}`,
+    preheader: t('email.mentionLead', { conversation, org }),
     eyebrow: t('email.eyebrow.message'),
     title: t('email.mentionTitle', { author }),
     intro: escapeHtml(t('email.mentionLead', { conversation, org })),
-    quote: { author, text: preview },
     details: [
       [t('email.labels.conversation'), conversation],
       [t('email.labels.org'), org],
