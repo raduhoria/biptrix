@@ -364,6 +364,13 @@
 .meet-chat-form { display: flex; gap: .4rem; align-items: flex-end; padding-top: .5rem; }
 .meet-chat-form textarea { resize: none; max-height: 7rem; }
 .call-banner { position: absolute; top: 3.6rem; left: 50%; transform: translateX(-50%); z-index: 20; padding: .45rem 1rem; border-radius: 2rem; background: rgba(26, 28, 35, .92); box-shadow: 0 4px 16px rgba(0, 0, 0, .35); font-size: .9rem; }
+/* Call encryption: green lock (end to end), amber shield (through the SFU). */
+.sec-badge { display: inline-flex; align-items: center; gap: .35rem; border: 1px solid rgba(245, 158, 11, .45); color: #fcd34d; background: rgba(245, 158, 11, .1); border-radius: 999px; }
+.sec-badge.e2e { border-color: rgba(34, 197, 94, .45); color: #86efac; background: rgba(34, 197, 94, .1); }
+.sec-badge:hover { color: #fff; }
+.sec-badge .ic { width: 1rem; height: 1rem; }
+.sec-info { position: absolute; top: 3.6rem; right: .8rem; z-index: 21; max-width: min(24rem, calc(100% - 1.6rem)); padding: .6rem .85rem; border-radius: .8rem; background: rgba(26, 28, 35, .96); box-shadow: 0 4px 16px rgba(0, 0, 0, .35); font-size: .85rem; line-height: 1.4; }
+@media (max-width: 575px) { .sec-badge span { display: none; } }
 .call-banner .ring-dot { display: inline-block; width: .55rem; height: .55rem; margin-right: .4rem; border-radius: 50%; background: #22c55e; animation: pulse 1s infinite; }
 .meet-panel .dropdown-menu { --bs-dropdown-bg: #2a2d36; --bs-dropdown-link-color: #e5e7eb; --bs-dropdown-link-hover-bg: #3a3e4a; --bs-dropdown-link-hover-color: #fff; }
 .lobby-item { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .5rem; margin-bottom: .4rem; border-radius: .6rem; background: rgba(245, 158, 11, .12); }

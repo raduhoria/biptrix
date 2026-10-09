@@ -1055,15 +1055,32 @@ function leaveSfu() {
   clearTimeout(moveTimer);
   request('sfu.leave', {}).catch(() => {});
   sfu.pc.close();
+  renderSecurity();
   for (const peer of state.peers.values()) {
     peer.sfuGot.clear();
     for (const [slot, track] of Object.entries(peer.meshTracks)) whenLive(track, () => peer.meshTracks[slot] === track && showTrack(peer, slot, track));
   }
 }
 
+// Whether the call is end-to-end encrypted, for everyone in it: peer to
+// peer (directly or through a TURN relay, which only forwards encrypted
+// packets) it is; through the SFU the media server can see the media. While
+// moving back from the SFU it still counts as "through the SFU" until the
+// SFU session is gone.
+function renderSecurity() {
+  const el = $('#sec-badge');
+  const e2e = state.topology !== 'sfu' && !state.sfu;
+  el.hidden = !state.joined;
+  el.classList.toggle('e2e', e2e);
+  el.innerHTML = `${icon(e2e ? 'lock' : 'shield')}<span>${esc(t(e2e ? 'meet.secE2e' : 'meet.secSfu'))}</span>`;
+  el.title = t(e2e ? 'meet.secE2eInfo' : 'meet.secSfuInfo', { n: boot.meshMax });
+  if (!$('#sec-info').hidden) $('#sec-info').textContent = el.title;
+}
+
 function moveTo(topology) {
   if (!state.joined || state.topology === topology) return;
   state.topology = topology;
+  renderSecurity();
   clearTimeout(moveTimer);
   if (topology === 'sfu') {
     for (const peer of state.peers.values()) peer.sfuGot.clear();
@@ -1272,6 +1289,7 @@ function renderLocalTile() {
 // Grid sized to the number of tiles; a shared screen takes the stage when
 // spotlight mode is on.
 function layout() {
+  renderSecurity();
   const tiles = $('#tiles');
   const all = $$('.tile', tiles);
   const screen = state.spotlight && all.find((el) => el.classList.contains('screen-tile'));
@@ -1463,6 +1481,15 @@ root.addEventListener('click', async (e) => {
     case 'toggle-layout':
       state.spotlight = !state.spotlight;
       return layout();
+    case 'security': {
+      // The explanation, under the header; a tap (or 10 s) hides it.
+      const info = $('#sec-info');
+      info.hidden = !info.hidden;
+      info.textContent = $('#sec-badge').title;
+      clearTimeout(info.timer);
+      if (!info.hidden) info.timer = setTimeout(() => (info.hidden = true), 10_000);
+      return;
+    }
     case 'copy-link':
       await navigator.clipboard.writeText(location.href).catch(() => {});
       btn.classList.add('active');
