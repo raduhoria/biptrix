@@ -740,7 +740,10 @@ function onMessage(m, created) {
       if (mentioned) c.mentions = (c.mentions || 0) + 1;
       // (A call that rings has its own screen, see onRing.)
       const rings = m.kind === 'meeting' && m.meta?.call && (c.type === 'dm' || c.member_count <= SMALL_SPACE) && c.notify !== 'none';
-      if (c.notify !== 'none' && !rings && (mentioned || c.notify === 'all' || m.kind === 'meeting')) notify(c, m);
+      if (c.notify !== 'none' && !rings && (mentioned || c.notify === 'all' || m.kind === 'meeting')) {
+        notify(c, m);
+        beep(m.id);
+      }
     }
   }
   renderSidebar();
@@ -796,6 +799,56 @@ function notify(c, m) {
     openConversation(c.id);
     n.close();
   };
+}
+
+// "Picătură": one short sine that glides up, like a drop (WebAudio, no
+// sound file). Plays for what would notify, while the app is open: not in
+// "do not disturb", not when switched off on this device, and not when a
+// push notification (with the system's own sound) shows it instead. Several
+// tabs: only the first one to see a message plays it.
+const SOUND_KEY = 'sound.off';
+let audioCtx = null;
+const soundOn = () => localStorage.getItem(SOUND_KEY) !== '1';
+
+function drop() {
+  try {
+    audioCtx ||= new AudioContext();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    const t0 = audioCtx.currentTime + 0.02;
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.16);
+    gain.connect(audioCtx.destination);
+    const osc = audioCtx.createOscillator();
+    osc.frequency.setValueAtTime(700, t0);
+    osc.frequency.exponentialRampToValueAtTime(1500, t0 + 0.1);
+    osc.connect(gain);
+    osc.start(t0);
+    osc.stop(t0 + 0.2);
+  } catch {
+    // No audio on this device.
+  }
+}
+
+function beep(messageId) {
+  if (!soundOn() || localStorage.getItem('presence') === 'dnd' || (state.pushActive && !isVisible())) return;
+  if (localStorage.getItem('sound.last') === messageId) return;
+  localStorage.setItem('sound.last', messageId);
+  drop();
+}
+
+// Browsers only let a page play sound after the person interacted with it:
+// the first click or key unlocks the audio for later messages.
+const unlockAudio = () => {
+  audioCtx ||= new AudioContext();
+  audioCtx.resume().catch(() => {});
+};
+for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, unlockAudio, { once: true, capture: true });
+
+function renderSoundToggle() {
+  const el = $('#sound-toggle');
+  if (el) el.innerHTML = `${icon(soundOn() ? 'bell' : 'bell-off')} ${esc(t(soundOn() ? 'soundOn' : 'soundOff'))}`;
 }
 
 function askNotifications() {
@@ -1790,6 +1843,10 @@ document.addEventListener('click', async (e) => {
       return messageAction(action, el);
     case 'older':
       return loadOlder();
+    case 'toggle-sound':
+      localStorage.setItem(SOUND_KEY, soundOn() ? '1' : '0');
+      if (soundOn()) drop();
+      return renderSoundToggle();
     case 'members':
       return state.panel === 'members' ? closePanel() : openMembers();
     case 'pinned':
@@ -2124,6 +2181,7 @@ if (vv) {
   socket.connect();
   state.pushActive = await refreshPush(boot.push);
   renderPushBanner();
+  renderSoundToggle();
   // Outbox entries from before a reload are retried once connected; if the
   // socket never opens, fall back to HTTP after a few seconds.
   setTimeout(() => !socket.isOpen() && flushOutbox(), 5000);

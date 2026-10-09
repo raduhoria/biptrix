@@ -71,6 +71,8 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
           <li><button class="dropdown-item" data-presence="online"><span class="presence-dot online"></span> ${e('client.status.online')}</button></li>
           <li><button class="dropdown-item" data-presence="away"><span class="presence-dot away"></span> ${e('client.status.away')}</button></li>
           <li><button class="dropdown-item" data-presence="dnd"><span class="presence-dot dnd"></span> ${e('client.status.dnd')}</button></li>
+          <li><hr class="dropdown-divider"></li>
+          <li><button class="dropdown-item d-flex align-items-center gap-2" data-action="toggle-sound" id="sound-toggle" title="${e('client.soundHelp')}">${icon('bell')} ${e('client.soundOn')}</button></li>
         </ul>
       </div>
     </div>
