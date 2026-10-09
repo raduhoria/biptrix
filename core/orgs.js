@@ -4,8 +4,8 @@ import { appError, canonicalEmail, isEmail, isoIn, newId, newToken, nowIso, sha2
 // every request; the UI only hides what the server would refuse anyway.
 export const ORG_ROLES = ['owner', 'admin', 'compliance', 'member', 'external'];
 const PERMISSIONS = {
-  owner: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create', 'org.manage', 'members.manage', 'spaces.manage', 'policies.manage', 'audit.read'],
-  admin: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create', 'members.manage', 'spaces.manage', 'policies.manage', 'audit.read'],
+  owner: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create', 'org.manage', 'members.manage', 'spaces.manage', 'policies.manage', 'announcements.manage', 'audit.read'],
+  admin: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create', 'members.manage', 'spaces.manage', 'policies.manage', 'announcements.manage', 'audit.read'],
   compliance: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create', 'audit.read'],
   member: ['chat', 'calls', 'directory', 'spaces.browse', 'meetings.create'],
   // External collaborators only see what was shared with them explicitly;

@@ -403,6 +403,23 @@
 .tile:fullscreen video { object-fit: contain; }
 .mfa-qr svg { display: block; width: 200px; max-width: 100%; height: auto; border-radius: .5rem; border: 1px solid var(--bs-border-color); }
 .push-banner { margin: .25rem .75rem .6rem; padding: .6rem .75rem; border-radius: .7rem; background: var(--brand-soft); }
+/* Company announcements (sidebar). --ann: the level's color. */
+.announcements { display: flex; flex-direction: column; gap: .4rem; margin: .25rem .75rem .6rem; }
+.announcements[hidden] { display: none; }
+.ann { --ann: #4f46e5; padding: .5rem .6rem .55rem .7rem; border-radius: .7rem; border-left: 3px solid var(--ann); background: color-mix(in srgb, var(--ann) 9%, transparent); font-size: .82rem; }
+.ann-warning { --ann: #d97706; }
+.ann-success { --ann: #16a34a; }
+.ann-head { display: flex; align-items: flex-start; gap: .4rem; }
+.ann-head > .ic { flex: none; margin-top: .15rem; color: var(--ann); }
+.ann-title { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.ann-hide { flex: none; margin: -.2rem -.3rem 0 0; padding: .1rem; opacity: .55; }
+.ann-hide:hover { opacity: 1; }
+.ann-body { margin-top: .2rem; color: var(--bs-secondary-color); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.ann.open .ann-body { display: block; }
+.ann-toggle { font-size: .78rem; }
+.ann-dot { display: inline-block; width: .55rem; height: .55rem; border-radius: 50%; background: #4f46e5; vertical-align: .05rem; }
+.ann-dot.ann-warning { background: #d97706; }
+.ann-dot.ann-success { background: #16a34a; }
 .tile.presenting { background: #1e1b4b; }
 .tile.presenting .tile-avatar { display: flex; }
 .presenting-ic { width: 2.4rem; height: 2.4rem; opacity: .85; }

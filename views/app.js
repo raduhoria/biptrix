@@ -90,6 +90,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
     </div>
 
     <div class="side-scroll">
+      <div class="announcements" id="announcements" hidden></div>
       <div class="push-banner" id="push-banner" hidden></div>
       <button class="side-link" data-view="people">${icon('users')} <span>${e('client.people')}</span><span class="badge rounded-pill text-bg-success ms-auto" id="online-count" hidden></span></button>
       <button class="side-link" data-view="meetings">${icon('calendar')} <span>${e('client.meetings')}</span><span class="badge rounded-pill text-bg-danger ms-auto" id="live-count" hidden></span></button>

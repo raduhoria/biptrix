@@ -1,3 +1,4 @@
+import { ANNOUNCEMENT_LEVELS } from '../core/announcements.js';
 import { can, ORG_ROLES } from '../core/orgs.js';
 import { alerts, consolePage, escapeHtml, fmtDate, table } from './layout.js';
 
@@ -9,6 +10,7 @@ function adminNav(t, org, role) {
     { href: base, key: 'overview', label: t('admin.overview'), ic: 'grid' },
     can(role, 'members.manage') && { href: `${base}/members`, key: 'members', label: t('admin.members'), ic: 'users' },
     can(role, 'spaces.manage') && { href: `${base}/spaces`, key: 'spaces', label: t('admin.spaces'), ic: 'hash' },
+    can(role, 'announcements.manage') && { href: `${base}/announcements`, key: 'announcements', label: t('admin.announcements'), ic: 'megaphone' },
     can(role, 'policies.manage') && { href: `${base}/policies`, key: 'policies', label: t('admin.policies'), ic: 'shield' },
     can(role, 'audit.read') && { href: `${base}/audit`, key: 'audit', label: t('admin.audit'), ic: 'activity' },
   ].filter(Boolean);
@@ -129,6 +131,49 @@ export function spacesView({ t, req, spaces, notice, error }) {
     `<form method="post" action="/o/${escapeHtml(org.slug)}/admin/spaces/${escapeHtml(s.id)}/${s.archived_at ? 'unarchive' : 'archive'}"><button class="btn btn-sm btn-outline-secondary">${escapeHtml(t(s.archived_at ? 'admin.unarchive' : 'admin.archive'))}</button></form>`,
   ]);
   return shell(t, req, 'spaces', t('admin.spaces'), `${alerts({ notice, error })}<section class="card"><div class="card-body">${table([t('admin.space'), t('admin.visibility'), t('admin.statMembers'), t('admin.lastActivity'), t('admin.status'), ''], rows, t('admin.noSpaces'))}</div></section>`);
+}
+
+// Company announcements: one form (new, or the one being edited) and the
+// list with each one's state on today's date.
+export function announcementsView({ t, req, list, editing, notice, error }) {
+  const org = req.org;
+  const today = new Date().toISOString().slice(0, 10);
+  const a = editing || { level: 'info', starts_on: today, ends_on: new Date(Date.now() + 6 * 86400_000).toISOString().slice(0, 10) };
+  const levels = ANNOUNCEMENT_LEVELS.map((l) => `<option value="${l}"${l === a.level ? ' selected' : ''}>${escapeHtml(t(`admin.annLevel.${l}`))}</option>`).join('');
+  const stateBadge = (r) =>
+    r.ends_on < today
+      ? `<span class="badge text-bg-secondary">${escapeHtml(t('admin.annExpired'))}</span>`
+      : r.starts_on > today
+      ? `<span class="badge text-bg-info-subtle text-info-emphasis">${escapeHtml(t('admin.annScheduled'))}</span>`
+      : `<span class="badge text-bg-success-subtle text-success-emphasis">${escapeHtml(t('admin.active'))}</span>`;
+  const rows = list.map((r) => [
+    `<div class="fw-semibold"><span class="ann-dot ann-${escapeHtml(r.level)}"></span> ${escapeHtml(r.title)}</div>${r.body ? `<div class="small text-body-secondary text-truncate" style="max-width:32rem">${escapeHtml(r.body)}</div>` : ''}`,
+    `<span class="text-nowrap">${escapeHtml(r.starts_on)} → ${escapeHtml(r.ends_on)}</span>`,
+    stateBadge(r),
+    `<div class="d-flex gap-1"><a class="btn btn-sm btn-outline-secondary" href="?edit=${encodeURIComponent(r.id)}">${escapeHtml(t('common.edit'))}</a>
+      <form method="post" action="/o/${escapeHtml(org.slug)}/admin/announcements/${escapeHtml(r.id)}/delete" data-confirm="${escapeHtml(t('admin.annDeleteConfirm', { title: r.title }))}"><button class="btn btn-sm btn-outline-danger">${escapeHtml(t('common.delete'))}</button></form></div>`,
+  ]);
+  return shell(
+    t,
+    req,
+    'announcements',
+    t('admin.announcements'),
+    `${alerts({ notice, error })}
+    <section class="card mb-4"><div class="card-body">
+      <h2 class="h6 text-uppercase text-body-secondary mb-1">${escapeHtml(t(a.id ? 'admin.annEdit' : 'admin.annNew'))}</h2>
+      <p class="small text-body-secondary">${escapeHtml(t('admin.annHelp'))}</p>
+      <form method="post" action="/o/${escapeHtml(org.slug)}/admin/announcements" class="row g-3">
+        ${a.id ? `<input type="hidden" name="id" value="${escapeHtml(a.id)}">` : ''}
+        <div class="col-md-8"><label class="form-label" for="a-title">${escapeHtml(t('admin.annTitle'))}</label><input class="form-control" id="a-title" name="title" value="${escapeHtml(a.title || '')}" maxlength="120" required></div>
+        <div class="col-md-4"><label class="form-label" for="a-level">${escapeHtml(t('admin.annLevelLabel'))}</label><select class="form-select" id="a-level" name="level">${levels}</select></div>
+        <div class="col-12"><label class="form-label" for="a-body">${escapeHtml(t('admin.annBody'))}</label><textarea class="form-control" id="a-body" name="body" rows="3" maxlength="2000">${escapeHtml(a.body || '')}</textarea><div class="form-text">${escapeHtml(t('admin.annBodyHelp'))}</div></div>
+        <div class="col-sm-6 col-md-3"><label class="form-label" for="a-from">${escapeHtml(t('admin.annFrom'))}</label><input class="form-control" type="date" id="a-from" name="starts_on" value="${escapeHtml(a.starts_on || '')}" required></div>
+        <div class="col-sm-6 col-md-3"><label class="form-label" for="a-to">${escapeHtml(t('admin.annTo'))}</label><input class="form-control" type="date" id="a-to" name="ends_on" value="${escapeHtml(a.ends_on || '')}" required></div>
+        <div class="col-md-6 d-flex align-items-end gap-2"><button class="btn btn-primary">${escapeHtml(t(a.id ? 'common.save' : 'admin.annPublish'))}</button>${a.id ? `<a class="btn btn-outline-secondary" href="/o/${escapeHtml(org.slug)}/admin/announcements">${escapeHtml(t('common.cancel'))}</a>` : ''}</div>
+      </form>
+    </div></section>
+    <section class="card"><div class="card-body">${table([t('admin.annTitle'), t('admin.annPeriod'), t('admin.status'), ''], rows, t('admin.annNone'))}</div></section>`
+  );
 }
 
 export function policiesView({ t, req, policy, notice, error }) {
