@@ -1,4 +1,6 @@
-import { $, $$, api, esc, hue, icon, initials, randomId, translator } from './lib.js';
+import { $, $$, api, esc, fitViewport, hue, icon, initials, randomId, translator } from './lib.js';
+
+fitViewport();
 
 // Meeting room client. Media is a peer-to-peer mesh over WebRTC; the server
 // (/ws/meeting) only admits people and relays SDP/ICE between admitted

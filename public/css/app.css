@@ -128,8 +128,7 @@
 }
 
 /* -------------------------------------------------------------- chat app */
-/* --app-h: the visible height on iOS, where the on-screen keyboard does not
-   shrink the page (chat.js); Android shrinks it (interactive-widget). */
+/* --app-h: the height actually visible (lib.js fitViewport). */
 .app-body { height: 100vh; height: var(--app-h, 100dvh); overflow: hidden; }
 .app { display: grid; grid-template-columns: 64px 290px minmax(0, 1fr); height: 100%; }
 .app.with-panel { grid-template-columns: 64px 290px minmax(0, 1fr) 380px; }
@@ -300,7 +299,7 @@
 }
 
 /* --------------------------------------------------------------- meeting */
-.meet-body { height: 100vh; height: 100dvh; overflow: hidden; background: #0b0c10; color: #e5e7eb; }
+.meet-body { height: 100vh; height: var(--app-h, 100dvh); overflow: hidden; background: #0b0c10; color: #e5e7eb; }
 .meet { display: flex; flex-direction: column; height: 100%; }
 .meet-top { display: flex; align-items: center; gap: .7rem; padding: .6rem 1rem; }
 .brand-mini svg { width: 1.8rem; height: 1.8rem; }
