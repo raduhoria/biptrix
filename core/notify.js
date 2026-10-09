@@ -42,14 +42,20 @@ export function createNotifier({ db, mailer, policies, config, isOnline, isWatch
       const url = `${config.appUrl}/o/${org.slug}/c/${conversation.id}`;
 
       if (push && !isWatching(org.id, userId)) {
-        push
-          .toUser(userId, {
-            type: 'message',
-            tag: `c-${conversation.id}`,
-            title: conversation.type === 'dm' ? author.name : `${author.name} · ${name}`,
-            body: row.push_preview ? preview : t(mentions.has(userId) ? 'push.mention' : 'push.newMessage', { name: author.name }),
-            url,
-          })
+        chat
+          .unreadTotal(userId)
+          .catch(() => null)
+          .then((badge) =>
+            push.toUser(userId, {
+              type: 'message',
+              tag: `c-${conversation.id}`,
+              title: conversation.type === 'dm' ? author.name : `${author.name} · ${name}`,
+              body: row.push_preview ? preview : t(mentions.has(userId) ? 'push.mention' : 'push.newMessage', { name: author.name }),
+              url,
+              // The number on the installed app's icon, while it is closed.
+              badge,
+            })
+          )
           .catch(() => {});
       }
 

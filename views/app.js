@@ -119,7 +119,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
 
     <section class="view view-conv" id="view-conv" aria-live="polite">
       <header class="conv-head">
-        <button class="btn btn-icon d-lg-none" data-action="back" aria-label="${e('common.back')}">${icon('chevron-left')}</button>
+        <button class="btn btn-icon d-lg-none back-btn" data-action="back" aria-label="${e('common.back')}">${icon('chevron-left')}<span class="back-badge" hidden></span></button>
         <div class="conv-title min-w-0">
           <h2 class="h6 mb-0 text-truncate" id="conv-name"></h2>
           <div class="small text-body-secondary text-truncate" id="conv-sub"></div>
@@ -146,7 +146,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
 
     <section class="view view-people" id="view-people">
       <header class="conv-head">
-        <button class="btn btn-icon d-lg-none" data-action="back" aria-label="${e('common.back')}">${icon('chevron-left')}</button>
+        <button class="btn btn-icon d-lg-none back-btn" data-action="back" aria-label="${e('common.back')}">${icon('chevron-left')}<span class="back-badge" hidden></span></button>
         <div class="min-w-0"><h2 class="h6 mb-0">${e('client.people')}</h2><div class="small text-body-secondary" id="people-sub"></div></div>
         <input class="form-control form-control-sm ms-auto people-search" type="search" id="people-search" placeholder="${e('client.searchPeople')}" aria-label="${e('client.searchPeople')}">
       </header>
@@ -155,7 +155,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
 
     <section class="view view-meetings" id="view-meetings">
       <header class="conv-head">
-        <button class="btn btn-icon d-lg-none" data-action="back" aria-label="${e('common.back')}">${icon('chevron-left')}</button>
+        <button class="btn btn-icon d-lg-none back-btn" data-action="back" aria-label="${e('common.back')}">${icon('chevron-left')}<span class="back-badge" hidden></span></button>
         <h2 class="h6 mb-0">${e('client.meetings')}</h2>
         ${boot.perms.meetings ? `<button class="btn btn-primary btn-sm ms-auto" data-action="new-meeting">${icon('plus')} ${e('client.newMeeting')}</button>` : ''}
       </header>

@@ -128,6 +128,7 @@ describe('push notifications', () => {
     assert.equal(sent[0].payload.type, 'message');
     assert.equal(sent[0].payload.title, 'Ana');
     assert.equal(sent[0].payload.body, 'Salut Bob');
+    assert.equal(sent[0].payload.badge, 1, 'unread count for the app icon');
     assert.match(sent[0].headers.Authorization, /^vapid t=.+, k=/);
     assert.equal(sent[0].headers['Content-Encoding'], 'aes128gcm');
 
@@ -145,6 +146,7 @@ describe('push notifications', () => {
     await new Promise((r) => setTimeout(r, 100));
     await anaClient.post(`${API()}/conversations/${dm.id}/messages`, { json: { client_message_id: 'push-msg-3', body: 'Acum?' } });
     assert.ok(await until(() => sent.length === 1));
+    assert.equal(sent[0].payload.badge, 3);
     ws.ws.close();
   });
 
@@ -156,6 +158,19 @@ describe('push notifications', () => {
     assert.doesNotMatch(JSON.stringify(sent[0].payload), /secret/);
     assert.match(sent[0].payload.body, /Ana/);
     await bobClient.post('/account/push/preview', { form: { preview: '1' } });
+  });
+
+  test('the app icon count drops once read, and leaves out silenced conversations', async () => {
+    const { conversation } = (await bobClient.get(`${API()}/conversations/${dm.id}`)).data;
+    await bobClient.post(`${API()}/conversations/${dm.id}/read`, { json: { seq: conversation.last_seq } });
+    sent.length = 0;
+    await anaClient.post(`${API()}/conversations/${dm.id}/messages`, { json: { client_message_id: 'push-badge-1', body: 'Unul nou' } });
+    assert.ok(await until(() => sent.length === 1));
+    assert.equal(sent[0].payload.badge, 1);
+    // Silenced ("none"): still unread, but not counted on the icon.
+    await bobClient.post(`${API()}/conversations/${dm.id}/notify`, { json: { level: 'none' } });
+    assert.equal(await app.services.chat.unreadTotal(bob.id), 0);
+    await bobClient.post(`${API()}/conversations/${dm.id}/notify`, { json: { level: 'all' } });
   });
 
   test('a call rings the devices with answer/decline; a missed call replaces it', async () => {

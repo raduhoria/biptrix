@@ -558,11 +558,26 @@ export function createChat({ db, events, audit, policies }) {
     return { messages: rows.map((r) => ({ ...parseMessage(r), snippet: r.snippet })), files };
   }
 
+  // Unread messages for the app icon's badge: every organization the user
+  // still belongs to, conversations not switched to "none" (as the client).
+  async function unreadTotal(userId) {
+    const row = await db.get(
+      `SELECT COALESCE(SUM((SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.seq > cm.last_read_seq AND m.author_id IS NOT ? AND m.deleted_at IS NULL)), 0) AS n
+       FROM conversation_members cm JOIN conversations c ON c.id = cm.conversation_id
+       JOIN memberships ms ON ms.org_id = c.org_id AND ms.user_id = cm.user_id AND ms.status = 'active' AND (ms.access_expires_at IS NULL OR ms.access_expires_at > ?)
+       WHERE cm.user_id = ? AND c.archived_at IS NULL AND c.last_seq > cm.last_read_seq
+         AND COALESCE(cm.notify, CASE WHEN cm.muted = 1 THEN 'none' END, '') != 'none'`,
+      [userId, nowIso(), userId]
+    );
+    return row.n;
+  }
+
   return {
     requireConversation,
     canModerate,
     memberIds,
     list,
+    unreadTotal,
     one,
     directory,
     openDm,
