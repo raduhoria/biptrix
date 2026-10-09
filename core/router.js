@@ -38,7 +38,7 @@ export function parseCookies(header) {
   return out;
 }
 
-function decorateResponse(res) {
+export function decorateResponse(res) {
   res.status = (code) => {
     res.statusCode = code;
     return res;
