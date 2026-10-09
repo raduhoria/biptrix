@@ -214,6 +214,8 @@ function handle(msg) {
       return onRing(d);
     case 'call.stop':
       return stopRinging(d.meeting_id);
+    case 'announcements.changed':
+      return refreshAnnouncements();
     default:
   }
 }
@@ -232,6 +234,8 @@ async function loadAll() {
   const live = $('#live-count');
   live.hidden = !data.meetings_live;
   live.textContent = data.meetings_live || '';
+  state.announcements = data.announcements || [];
+  renderAnnouncements();
   renderSidebar();
   if (state.current) {
     if (!state.conversations.has(state.current)) showEmpty();
@@ -2027,6 +2031,63 @@ document.addEventListener('click', async (e) => {
   }
   renderPushBanner();
 });
+
+// Company announcements pinned in the sidebar, each between two calendar
+// days of the viewer's own date. Hiding one is per device and lasts until
+// the announcement is edited (the stored updated_at no longer matches).
+const ANN_KEY = `ann.hidden:${ORG.id}`;
+const localDay = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const hiddenAnnouncements = () => JSON.parse(localStorage.getItem(ANN_KEY) || '{}');
+
+function renderAnnouncements() {
+  const box = $('#announcements');
+  const today = localDay();
+  const hidden = hiddenAnnouncements();
+  const shown = (state.announcements || []).filter((a) => a.starts_on <= today && a.ends_on >= today && hidden[a.id] !== a.updated_at);
+  box.hidden = !shown.length;
+  box.innerHTML = shown
+    .map(
+      (a) => `<div class="ann ann-${esc(a.level)}" data-ann="${esc(a.id)}">
+      <div class="ann-head">${icon(a.level === 'warning' ? 'alert' : 'megaphone')}<span class="ann-title">${esc(a.title)}</span>
+        <button class="btn btn-icon btn-sm ann-hide" data-ann-hide="${esc(a.id)}" title="${esc(t('annHide'))}" aria-label="${esc(t('annHide'))}">${icon('x')}</button></div>
+      ${a.body ? `<div class="ann-body">${renderMarkdown(a.body)}</div><button class="btn btn-link btn-sm p-0 ann-toggle" data-ann-toggle hidden>${esc(t('annMore'))}</button>` : ''}
+    </div>`
+    )
+    .join('');
+  // "More" only where the text is cut off.
+  for (const el of $$('.ann', box)) {
+    const body = $('.ann-body', el);
+    if (body && body.scrollHeight > body.clientHeight + 1) $('[data-ann-toggle]', el).hidden = false;
+  }
+}
+
+async function refreshAnnouncements() {
+  try {
+    state.announcements = (await api(`${API}/announcements`)).announcements;
+    renderAnnouncements();
+  } catch {
+    // The next reload brings them.
+  }
+}
+
+$('#announcements').addEventListener('click', (e) => {
+  const hide = e.target.closest('[data-ann-hide]');
+  if (hide) {
+    const a = state.announcements.find((x) => x.id === hide.dataset.annHide);
+    // Only ids still published are kept, so the map does not grow.
+    const hidden = Object.fromEntries(Object.entries(hiddenAnnouncements()).filter(([id]) => state.announcements.some((x) => x.id === id)));
+    if (a) hidden[a.id] = a.updated_at;
+    localStorage.setItem(ANN_KEY, JSON.stringify(hidden));
+    return renderAnnouncements();
+  }
+  const toggle = e.target.closest('[data-ann-toggle]');
+  if (toggle) {
+    const open = toggle.closest('.ann').classList.toggle('open');
+    toggle.textContent = t(open ? 'annLess' : 'annMore');
+  }
+});
+// Day changes (midnight, a laptop waking up) start and end announcements.
+setInterval(renderAnnouncements, 5 * 60_000);
 
 (async () => {
   try {

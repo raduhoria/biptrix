@@ -3,11 +3,11 @@ import { translateError } from '../core/i18n.js';
 import { readForm } from '../core/router.js';
 import { canonicalEmail, isEmail, nowIso } from '../core/util.js';
 import { orgInviteEmail, testEmail } from '../views/emails.js';
-import { auditView, membersView, overviewView, policiesView, spacesView } from '../views/admin.js';
+import { announcementsView, auditView, membersView, overviewView, policiesView, spacesView } from '../views/admin.js';
 
 // Organization console under /o/:org/admin. Requires an admin-level role and
 // MFA (spec §15); each page also checks its own permission.
-export function registerAdminRoutes(router, { auth, orgs, chat, policies, audit, realtime, mailer, config, db, files }) {
+export function registerAdminRoutes(router, { auth, orgs, chat, policies, audit, realtime, mailer, config, db, files, announcements }) {
   const gate = (permission) => [auth.requireUser, orgs.requireOrg, orgs.requirePermission(permission), auth.requireMfa];
   const base = (req) => `/o/${req.org.slug}/admin`;
   const flash = (req) => ({
@@ -137,6 +137,32 @@ export function registerAdminRoutes(router, { auth, orgs, chat, policies, audit,
       res.redirect(`${base(req)}/spaces?notice=saved`);
     });
   }
+
+  // ---------------------------------------------------------- announcements
+  // ?edit=<id> fills the form with that announcement.
+  router.get('/o/:org/admin/announcements', ...gate('announcements.manage'), async (req, res) => {
+    const editing = req.query.edit ? await announcements.one(req.org.id, String(req.query.edit)) : null;
+    res.send(announcementsView({ t: req.t, req, list: await announcements.all(req.org.id), editing, ...flash(req) }));
+  });
+
+  // Create (no id) or update.
+  router.post('/o/:org/admin/announcements', ...gate('announcements.manage'), async (req, res) => {
+    const form = await readForm(req);
+    const id = String(form.get('id') || '') || null;
+    const input = Object.fromEntries(form);
+    try {
+      await announcements.save(req.org, req.user, id, input, req.ip);
+      res.redirect(`${base(req)}/announcements?notice=saved`);
+    } catch (err) {
+      // The form comes back as typed, with the reason.
+      res.status(err.status || 400).send(announcementsView({ t: req.t, req, list: await announcements.all(req.org.id), editing: { ...input, id }, error: translateError(req.t, err) }));
+    }
+  });
+
+  router.post('/o/:org/admin/announcements/:id/delete', ...gate('announcements.manage'), async (req, res) => {
+    await announcements.remove(req.org, req.user, req.params.id, req.ip);
+    res.redirect(`${base(req)}/announcements?notice=announcementDeleted`);
+  });
 
   // --------------------------------------------------------------- policies
   router.get('/o/:org/admin/policies', ...gate('policies.manage'), async (req, res) => {

@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { createDb } from './db/connection.js';
 import { runMigrations } from './db/migrate.js';
+import { createAnnouncements } from './core/announcements.js';
 import { createAudit } from './core/audit.js';
 import { createCalls } from './core/calls.js';
 import { createPush } from './core/push.js';
@@ -52,6 +53,7 @@ export async function createApp(config, { quiet = false } = {}) {
   const events = createEvents({ db, nodeId: config.nodeId, cluster: config.cluster });
   const orgs = createOrgs({ db, users, audit, events });
   const policies = createPolicies({ db, audit });
+  const announcements = createAnnouncements({ db, audit, events });
   const chat = createChat({ db, events, audit, policies });
   const files = createFiles({ db, config, policies });
   const meetings = createMeetings({ db, policies, audit, appSecret, events });
@@ -96,7 +98,7 @@ export async function createApp(config, { quiet = false } = {}) {
 
   const router = createRouter({ onError });
   registerStatic(router, path.join(import.meta.dirname, 'public'), { dev: config.dev });
-  const deps = { push, calls, db, config, loginCodes, auth, users, orgs, policies, events, chat, files, meetings, media, mailer, rooms, realtime, notifier, audit, secretBox, health };
+  const deps = { announcements, push, calls, db, config, loginCodes, auth, users, orgs, policies, events, chat, files, meetings, media, mailer, rooms, realtime, notifier, audit, secretBox, health };
   registerAuthRoutes(router, deps);
   registerChatRoutes(router, deps);
   registerMeetingRoutes(router, deps);

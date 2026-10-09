@@ -7,7 +7,7 @@ import { chatView } from '../views/app.js';
 // Chat pages and JSON API under /api/o/:org (spec §14). The WebSocket is the
 // primary path for sending (core/realtime.js); POST .../messages is the HTTP
 // fallback with the same idempotency contract.
-export function registerChatRoutes(router, { auth, orgs, chat, files, policies, realtime, events, notifier, config, meetings, users, mailer, db }) {
+export function registerChatRoutes(router, { auth, orgs, chat, files, policies, realtime, events, notifier, config, meetings, users, mailer, db, announcements }) {
   const member = [auth.requireUser, orgs.requireOrg];
 
   async function page(req, res) {
@@ -22,6 +22,8 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
   const api = (path) => `/api/o/:org${path}`;
   const conv = (req) => req.params.id;
   const role = (req) => req.membership.role;
+  // Company announcements are for members, not external collaborators.
+  const currentAnnouncements = (req) => (role(req) === 'external' ? [] : announcements.current(req.org.id));
 
   router.get(api('/bootstrap'), ...member, async (req, res) => {
     const policy = await policies.get(req.org.id);
@@ -31,9 +33,12 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
       directory: await chat.directory(req.org, req.user, role(req)),
       presence: realtime.presenceSnapshot(req.org.id),
       meetings_live: (await meetings.listForUser(req.org, req.user)).filter((m) => m.state === 'live').length,
+      announcements: await currentAnnouncements(req),
       policy: { max_file_mb: Math.min(policy.max_file_mb, Math.round(config.maxUploadBytes / 1048576)) },
     });
   });
+
+  router.get(api('/announcements'), ...member, async (req, res) => res.json({ announcements: await currentAnnouncements(req) }));
 
   router.get(api('/conversations'), ...member, async (req, res) => res.json({ conversations: await chat.list(req.org, req.user) }));
 

@@ -103,6 +103,22 @@ CREATE TABLE IF NOT EXISTS org_domains (
   PRIMARY KEY (org_id, domain)
 );
 
+-- Company announcements: banners pinned for the organization's members
+-- between two calendar days (inclusive). level: info | warning | success
+CREATE TABLE IF NOT EXISTS announcements (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  level TEXT NOT NULL DEFAULT 'info',
+  starts_on TEXT NOT NULL,                  -- YYYY-MM-DD
+  ends_on TEXT NOT NULL,
+  created_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_announcements_org ON announcements(org_id, ends_on);
+
 -- role: owner | admin | compliance | member | external
 CREATE TABLE IF NOT EXISTS memberships (
   org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
