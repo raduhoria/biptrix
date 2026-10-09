@@ -403,3 +403,6 @@
 .tile:fullscreen video { object-fit: contain; }
 .mfa-qr svg { display: block; width: 200px; max-width: 100%; height: auto; border-radius: .5rem; border: 1px solid var(--bs-border-color); }
 .push-banner { margin: .25rem .75rem .6rem; padding: .6rem .75rem; border-radius: .7rem; background: var(--brand-soft); }
+.tile.presenting { background: #1e1b4b; }
+.tile.presenting .tile-avatar { display: flex; }
+.presenting-ic { width: 2.4rem; height: 2.4rem; opacity: .85; }
