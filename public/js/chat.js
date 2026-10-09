@@ -2086,8 +2086,9 @@ $('#announcements').addEventListener('click', (e) => {
     toggle.textContent = t(open ? 'annLess' : 'annMore');
   }
 });
-// Day changes (midnight, a laptop waking up) start and end announcements.
-setInterval(renderAnnouncements, 5 * 60_000);
+// Day changes (midnight, a laptop waking up) start and end announcements;
+// the server only sends those around today, so the list is fetched again.
+setInterval(refreshAnnouncements, 5 * 60_000);
 
 (async () => {
   try {

@@ -4,9 +4,10 @@ import { nowIso } from './util.js';
 // batch as the change (events.statement / messageEvent), so an event exists
 // if and only if its change was committed. Delivery has a single path:
 // pump() reads the log after the last dispatched id and hands each event to
-// the realtime hub — after a local write (notify()) and, in a multi-node
-// deployment, on a short timer, so events written by other Node instances
-// reach this node's sockets too. Lost wake-ups only add latency: the log is
+// the realtime hub — after a local write (notify()) and on a timer: short in
+// a multi-node deployment, so events written by other Node instances reach
+// this node's sockets too; slower on a single node, for writes from other
+// processes (maintenance scripts, the CLI). Lost wake-ups only add latency: the log is
 // the source of truth and clients resume from their own cursor (system.sync).
 
 // Serialized message snapshot, built by SQLite itself so the same JSON is used
@@ -24,7 +25,7 @@ export const MESSAGE_JSON = `json_object(
 
 const SYNC_LIMIT = 500;
 
-export function createEvents({ db, nodeId, cluster, pollMs = 400 }) {
+export function createEvents({ db, nodeId, cluster, pollMs = 400, idlePollMs = 2000 }) {
   let cursor = 0;
   let pumping = false;
   let again = false;
@@ -106,10 +107,8 @@ export function createEvents({ db, nodeId, cluster, pollMs = 400 }) {
     deliver = onEvent;
     giveUp = onGiveUp;
     cursor = (await db.get('SELECT COALESCE(MAX(id), 0) AS id FROM events')).id;
-    if (cluster) {
-      timer = setInterval(pump, pollMs);
-      timer.unref();
-    }
+    timer = setInterval(pump, cluster ? pollMs : idlePollMs);
+    timer.unref();
   }
 
   // Events visible to one user in one org after `since`. More than SYNC_LIMIT
