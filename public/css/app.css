@@ -101,11 +101,30 @@
 .console-main { flex: 1; min-width: 0; padding: 1.5rem 2rem 3rem; max-width: 1200px; }
 .console-main .card { border: 0; box-shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 1px 8px rgba(0, 0, 0, .03); }
 .audit-json { max-width: 420px; white-space: pre-wrap; }
+/* The organization's name gives way first when the top bar is narrow. */
+.console-org { min-width: 0; overflow: hidden; text-overflow: ellipsis; margin-left: .5rem; }
+.filter-input { flex: 1 1 12rem; width: auto; }
 @media (max-width: 860px) {
+  .console-top { padding: .5rem .75rem; }
   .console-wrap { flex-direction: column; }
-  .console-nav { width: auto; padding: .5rem; }
-  .console-nav .list-group { flex-direction: row; overflow-x: auto; }
-  .console-main { padding: 1rem; }
+  /* Every section stays visible: the links wrap instead of scrolling away. */
+  .console-nav { width: auto; padding: .5rem .5rem 0; }
+  .console-nav .list-group { flex-direction: row; flex-wrap: wrap; gap: .25rem; }
+  .console-nav .list-group-item { width: auto; margin: 0; padding: .35rem .65rem; font-size: .9rem; }
+  .console-main { padding: 1rem .75rem 2rem; }
+  .console-main h1 { margin-bottom: 1rem !important; }
+}
+/* Phones: table rows become stacked cards, each value under its column's
+   name (the first column, the row's title, needs none). */
+@media (max-width: 760px) {
+  .table-stack thead { display: none; }
+  .table-stack, .table-stack tbody, .table-stack tr, .table-stack td { display: block; width: 100%; }
+  .table-stack tr { padding: .65rem 0; border-bottom: 1px solid var(--bs-border-color); }
+  .table-stack tr:last-child { border-bottom: 0; }
+  .table-stack td { border: 0; padding: .15rem 0; background: transparent !important; box-shadow: none !important; }
+  .table-stack td:empty { display: none; }
+  .table-stack td:not(:first-child)[data-label]:not([data-label=""])::before { content: attr(data-label); display: block; font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; color: var(--bs-secondary-color); }
+  .audit-json { max-width: 100%; }
 }
 
 /* -------------------------------------------------------------- chat app */
