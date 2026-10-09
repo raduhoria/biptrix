@@ -1,3 +1,4 @@
+import { orgSender } from '../core/mailer.js';
 import { readForm } from '../core/router.js';
 import { appError, canonicalEmail, clampInt, isEmail, nowIso } from '../core/util.js';
 import { orgInviteEmail } from '../views/emails.js';
@@ -29,7 +30,7 @@ export function registerPlatformRoutes(router, { auth, orgs, users, audit, realt
     const org = await orgs.create({ name: form.get('name'), ownerId: owner?.id || null, actor: req.user, ip: req.ip });
     if (!owner) {
       const inv = await orgs.invite(org, { email, role: 'owner' }, { ...req.user, orgRole: 'owner' }, req.ip);
-      mailer.queue({ to: email, ...orgInviteEmail({ t: req.t, org: org.name, inviter: req.user.name, role: 'owner', url: `${config.appUrl}/invite/${inv.token}` }) });
+      mailer.queue({ to: email, sender: orgSender(org), ...orgInviteEmail({ t: req.t, org: org.name, inviter: req.user.name, role: 'owner', url: `${config.appUrl}/invite/${inv.token}` }) });
     }
     res.redirect('/platform?notice=orgCreated');
   });

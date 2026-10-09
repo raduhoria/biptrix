@@ -31,7 +31,11 @@ export function overviewView({ t, req, stats, notice, error }) {
             <div class="col-md-6"><label class="form-label" for="o-name">${escapeHtml(t('admin.orgName'))}</label><input class="form-control" id="o-name" name="name" value="${escapeHtml(org.name)}" maxlength="80" required></div>
             <div class="col-md-3"><label class="form-label" for="o-color">${escapeHtml(t('admin.brandColor'))}</label><input class="form-control form-control-color w-100" type="color" id="o-color" name="brand_color" value="${escapeHtml(org.brand_color || '#4f46e5')}"></div>
             <div class="col-md-3"><button class="btn btn-primary w-100">${escapeHtml(t('common.save'))}</button></div>
+            <div class="col-md-6"><label class="form-label" for="o-from">${escapeHtml(t('admin.emailFrom'))}</label><input class="form-control" type="email" id="o-from" name="email_from" value="${escapeHtml(org.email_from || '')}" placeholder="no-reply@firma.ro" maxlength="254"></div>
+            <div class="col-md-6"><label class="form-label" for="o-fromname">${escapeHtml(t('admin.emailFromName'))}</label><input class="form-control" id="o-fromname" name="email_from_name" value="${escapeHtml(org.email_from_name || '')}" placeholder="${escapeHtml(org.name)}" maxlength="80"></div>
+            <div class="col-12 form-text mt-1">${escapeHtml(t('admin.emailFromHelp'))}</div>
           </form>
+          <form method="post" action="/o/${escapeHtml(org.slug)}/admin/settings/test-email" class="mt-2"><button class="btn btn-sm btn-outline-secondary">${escapeHtml(t('admin.emailTest'))}</button></form>
         </div></section>`
       : '';
   return shell(

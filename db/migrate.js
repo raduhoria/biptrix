@@ -41,6 +41,10 @@ const MIGRATIONS = [
        WHERE messages.kind = 'meeting' AND mt.id = json_extract(messages.meta, '$.meeting_id') AND mt.state IN ('ended', 'canceled')`,
     ],
   ],
+  // Per-organization e-mail sender (e.g. no-reply@company.com): mail about
+  // an organization leaves from its own address; account mail (sign-in
+  // codes, password reset) keeps the platform sender.
+  [6, ['ALTER TABLE organizations ADD COLUMN email_from TEXT', 'ALTER TABLE organizations ADD COLUMN email_from_name TEXT']],
 ];
 
 export async function runMigrations(db) {

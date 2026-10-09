@@ -275,3 +275,12 @@ export const missedCallEmail = ({ t, org, caller, kind, url }) =>
     intro: escapeHtml(t('email.missedCallLead', { caller, org, kind: t(kind === 'audio' ? 'email.callAudio' : 'email.callVideo') })),
     action: { label: t('email.missedCallButton'), url },
   });
+
+export const testEmail = ({ t, org, from }) =>
+  frame({
+    t,
+    preheader: t('email.testTitle'),
+    eyebrow: t('email.eyebrow.message'),
+    title: t('email.testTitle'),
+    intro: escapeHtml(t('email.testIntro', { org, from })),
+  });

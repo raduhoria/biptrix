@@ -1,6 +1,7 @@
 import { createTranslator } from './i18n.js';
 import { nowIso } from './util.js';
 import { missedCallEmail } from '../views/emails.js';
+import { orgSender } from './mailer.js';
 
 export const RING_MS = 45_000;
 const HANG_UP_GRACE_MS = 15_000;
@@ -95,7 +96,7 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
         const u = await users.byId(userId);
         if (!u || u.status !== 'active') continue;
         const t = createTranslator(u.locale || 'en');
-        mailer.queue({ to: u.email, ...missedCallEmail({ t, org: org.name, caller: caller.name, kind: meeting.call_kind, url: `${config.appUrl}/o/${org.slug}/c/${meeting.conversation_id}` }) });
+        mailer.queue({ to: u.email, sender: orgSender(org), ...missedCallEmail({ t, org: org.name, caller: caller.name, kind: meeting.call_kind, url: `${config.appUrl}/o/${org.slug}/c/${meeting.conversation_id}` }) });
       }
     }
     // Nobody is left in a call that was never answered: close it.
