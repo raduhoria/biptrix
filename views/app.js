@@ -91,6 +91,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
 
     <div class="side-scroll">
       <div class="push-banner" id="push-banner" hidden></div>
+      <button class="side-link" data-view="people">${icon('users')} <span>${e('client.people')}</span><span class="badge rounded-pill text-bg-success ms-auto" id="online-count" hidden></span></button>
       <button class="side-link" data-view="meetings">${icon('calendar')} <span>${e('client.meetings')}</span><span class="badge rounded-pill text-bg-danger ms-auto" id="live-count" hidden></span></button>
       <div class="side-section">
         <div class="side-label">${e('client.directMessages')}</div>
@@ -138,6 +139,15 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
       </div>
       <div class="typing" id="typing"></div>
       <div class="composer-wrap" id="composer-main"></div>
+    </section>
+
+    <section class="view view-people" id="view-people">
+      <header class="conv-head">
+        <button class="btn btn-icon d-lg-none" data-action="back" aria-label="${e('common.back')}">${icon('chevron-left')}</button>
+        <div class="min-w-0"><h2 class="h6 mb-0">${e('client.people')}</h2><div class="small text-body-secondary" id="people-sub"></div></div>
+        <input class="form-control form-control-sm ms-auto people-search" type="search" id="people-search" placeholder="${e('client.searchPeople')}" aria-label="${e('client.searchPeople')}">
+      </header>
+      <div class="view-body" id="people-body"></div>
     </section>
 
     <section class="view view-meetings" id="view-meetings">

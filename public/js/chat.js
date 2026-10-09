@@ -282,6 +282,7 @@ function renderSidebar() {
   const spaces = list.filter((c) => c.type === 'space');
   $('#list-direct').innerHTML = direct.map(item).join('') || `<li class="side-empty">${esc(t('noDirect'))}</li>`;
   $('#list-spaces').innerHTML = spaces.map(item).join('') || `<li class="side-empty">${esc(t('noSpaces'))}</li>`;
+  renderOnlineCount();
   // Unread total on the installed app's icon.
   const unreadTotal = list.reduce((n, c) => n + (c.notify === 'none' ? 0 : c.unread || 0), 0);
   if (navigator.setAppBadge) (unreadTotal ? navigator.setAppBadge(unreadTotal) : navigator.clearAppBadge()).catch(() => {});
@@ -292,6 +293,7 @@ function renderSidebar() {
 // Re-render the places that show presence (cheap at this scale).
 function renderPresence(userId) {
   renderSidebar();
+  if (state.view === 'people') renderPeopleList();
   if (state.current) renderHeader();
   if (state.panel === 'members') openMembers();
   if (userId === ME) {
@@ -1565,6 +1567,69 @@ const modals = {
 
 // ---------------------------------------------------------------- meetings
 
+// ------------------------------------------------------------------ people
+// The organization's members (for external collaborators: the people they
+// share a conversation with), available first, then by name. A row opens
+// the profile card; the buttons message or call at once.
+
+const PRESENCE_ORDER = { online: 0, dnd: 1, away: 2 };
+
+function renderPeople() {
+  showView('people');
+  setUrl(`/o/${ORG.slug}/people`);
+  closePanel();
+  state.current = null;
+  renderSidebar();
+  renderPeopleList();
+  if (matchMedia('(min-width: 992px)').matches) $('#people-search').focus();
+}
+
+function renderPeopleList() {
+  const q = $('#people-search').value.trim().toLowerCase();
+  const all = [...state.directory.values()];
+  const rank = (p) => PRESENCE_ORDER[state.presence[p.id]] ?? 3;
+  const list = all
+    .filter((p) => !q || `${p.name} ${p.email} ${p.title || ''} ${p.department || ''}`.toLowerCase().includes(q))
+    .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+  const online = all.filter((p) => p.id !== ME && state.presence[p.id] && state.presence[p.id] !== 'offline').length;
+  $('#people-sub').textContent = t('peopleCount', { n: all.length, online });
+  const callButtons = (p) =>
+    boot.perms.calls
+      ? `<button class="btn btn-icon btn-sm" data-person-act="audio" title="${esc(t('startAudioCall'))}">${icon('phone')}</button>
+         <button class="btn btn-icon btn-sm" data-person-act="video" title="${esc(t('startCall'))}">${icon('video')}</button>`
+      : '';
+  $('#people-body').innerHTML = list.length
+    ? `<ul class="list-unstyled people-list">${list
+        .map((p) => {
+          const job = [p.title, p.department].filter(Boolean).join(' · ');
+          return `<li class="people-row" data-user="${esc(p.id)}">
+            <button class="person-link" data-person="${esc(p.id)}" aria-label="${esc(p.name)}">${avatar(p.id)}</button>
+            <div class="min-w-0 flex-grow-1">
+              <div class="text-truncate"><button class="person-link person-name" data-person="${esc(p.id)}">${esc(p.name)}</button>${p.id === ME ? ` <small class="text-body-secondary">(${esc(t('you'))})</small>` : ''}${extBadge(p.id)}</div>
+              <div class="small text-body-secondary text-truncate">${esc(job || p.email)}</div>
+            </div>
+            <span class="small text-body-secondary d-none d-sm-inline">${esc(t(`status.${state.presence[p.id] || 'offline'}`))}</span>
+            ${p.id === ME ? '' : `<div class="people-actions"><button class="btn btn-icon btn-sm" data-person-act="dm" title="${esc(t('message'))}">${icon('chat')}</button>${callButtons(p)}</div>`}
+          </li>`;
+        })
+        .join('')}</ul>`
+    : `<div class="empty-hero">${icon('users', 'hero-ic')}<p class="text-body-secondary">${esc(t(q ? 'noResults' : 'noPeople'))}</p></div>`;
+}
+
+// How many colleagues are available now, next to "People" in the sidebar.
+function renderOnlineCount() {
+  const online = [...state.directory.keys()].filter((id) => id !== ME && state.presence[id] && state.presence[id] !== 'offline').length;
+  const badge = $('#online-count');
+  badge.hidden = !online;
+  badge.textContent = online;
+}
+
+$('#people-search').addEventListener('input', () => renderPeopleList());
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-person-act]');
+  if (btn) profileAction(btn.dataset.personAct, btn.closest('[data-user]').dataset.user);
+});
+
 async function renderMeetings() {
   showView('meetings');
   setUrl(`/o/${ORG.slug}/meetings`);
@@ -1685,6 +1750,7 @@ document.addEventListener('click', async (e) => {
   }
   if (el.dataset.react) return messageAction('react', el, el.dataset.react);
   if (el.dataset.view === 'meetings') return renderMeetings();
+  if (el.dataset.view === 'people') return renderPeople();
   if (el.dataset.presence) {
     localStorage.setItem('presence', el.dataset.presence);
     state.presence[ME] = el.dataset.presence;
@@ -1914,9 +1980,10 @@ const resetIdle = debounce(() => {
 for (const ev of ['mousemove', 'keydown', 'focus']) window.addEventListener(ev, resetIdle);
 
 function route() {
-  const m = location.pathname.match(/^\/o\/[^/]+\/(c\/([^/]+)|meetings)/);
+  const m = location.pathname.match(/^\/o\/[^/]+\/(c\/([^/]+)|meetings|people)/);
   if (m?.[2]) openConversation(decodeURIComponent(m[2]), { push: false });
   else if (m?.[1] === 'meetings') renderMeetings();
+  else if (m?.[1] === 'people') renderPeople();
   else showEmpty();
 }
 window.addEventListener('popstate', route);

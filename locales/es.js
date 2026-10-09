@@ -405,6 +405,8 @@ export default {
     newSpace: 'Grupo',
     browseSpaces: 'Buscar grupos',
     newMeeting: 'Nueva reunión',
+    people: 'Personas',
+    peopleCount: '{n} personas · {online} disponibles ahora',
     meetings: 'Reuniones',
     directMessages: 'Mensajes directos',
     spaces: 'Grupos',
