@@ -3,7 +3,7 @@ import { appError, canonicalEmail, isEmail, newId, nowIso } from './util.js';
 // Global identities (spec §5). A user can belong to several organizations;
 // org-specific rights live in memberships (core/orgs.js).
 export function createUsers(db) {
-  const PUBLIC = 'id, email, name, status, platform_role, locale, (totp_secret IS NOT NULL) AS mfa_enabled, created_at';
+  const PUBLIC = 'id, email, name, status, platform_role, locale, push_preview, (totp_secret IS NOT NULL) AS mfa_enabled, created_at';
 
   const byId = (id) => db.get(`SELECT ${PUBLIC} FROM users WHERE id = ?`, [id]);
   const byEmail = (email) => db.get(`SELECT ${PUBLIC} FROM users WHERE email = ?`, [canonicalEmail(email)]);

@@ -152,6 +152,11 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
           if (!members.includes(user.id)) return;
           return sendToUsers(org.id, members, 'typing', { conversation_id: data.conversation_id, user_id: user.id, parent_id: data.parent_id || null }, {}, ws);
         }
+        case 'client.visible':
+          // The app is on screen (visible and focused) in this tab: no push
+          // notification is needed for this organization meanwhile.
+          ws.visible = !!data.visible;
+          return;
         case 'presence.set':
           if (PRESENCE.has(data.status)) setPresence(org.id, user.id, data.status);
           return;
@@ -265,6 +270,7 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
     // An event could not be delivered: clients of the org reload their state.
     resetOrg: (orgId) => broadcastOrg(orgId, 'system.reset', {}),
     isOnline: (orgId, userId) => !!byUser.get(`${orgId}:${userId}`)?.size,
+    isWatching: (orgId, userId) => [...(byUser.get(`${orgId}:${userId}`) || [])].some((ws) => ws.visible && ws.readyState === ws.OPEN),
     stats: () => ({ sockets: wss.clients.size, users: byUser.size }),
     close: () => {
       clearInterval(heartbeat);

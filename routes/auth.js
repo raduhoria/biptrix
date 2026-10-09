@@ -13,7 +13,7 @@ export const safeNext = (value, fallback = '/') => (typeof value === 'string' &&
 const RESET_TTL_MS = 3600_000;
 const MFA_COOKIE = 'mfa_setup';
 
-export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, audit, db, secretBox, realtime, loginCodes }) {
+export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, audit, db, secretBox, realtime, loginCodes, push }) {
   const { requireUser } = auth;
 
   router.get('/', async (req, res) => {
@@ -269,8 +269,25 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const sessions = await db.all('SELECT id_hash, ip, user_agent, last_seen_at FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen_at DESC LIMIT 20', [req.user.id, nowIso()]);
     const list = await orgs.forUser(req.user.id);
     const hasPassword = !!(await users.credentials(req.user.id))?.password_hash;
-    res.status(status).send(accountView({ t: req.t, user: req.user, orgs: list, sessions, currentHash: req.session.id_hash, notice, error, mfaSetup, hasPassword, codeSent, next: safeNext(req.query.next, '') }));
+    const pushInfo = push?.enabled ? { key: push.publicKey, devices: await push.devices(req.user.id) } : null;
+    res.status(status).send(accountView({ t: req.t, user: req.user, orgs: list, sessions, currentHash: req.session.id_hash, notice, error, mfaSetup, hasPassword, codeSent, push: pushInfo, next: safeNext(req.query.next, '') }));
   }
+
+  // ------------------------------------------------- push notifications
+  router.post('/account/push/test', requireUser, async (req, res) => {
+    const n = await push.toUser(req.user.id, { type: 'test', tag: 'test', title: req.t('push.testTitle'), body: req.t('push.testBody'), url: `${config.appUrl}/account` }, { urgency: 'high', ttl: 300 });
+    res.redirect(`/account?notice=${n ? 'pushTestSent' : 'pushNoDevice'}#push`);
+  });
+
+  router.post('/account/push/remove', requireUser, async (req, res) => {
+    await push.unsubscribe(req.user.id, (await readForm(req)).get('endpoint'));
+    res.redirect('/account?notice=saved#push');
+  });
+
+  router.post('/account/push/preview', requireUser, async (req, res) => {
+    await db.run('UPDATE users SET push_preview = ?, updated_at = ? WHERE id = ?', [(await readForm(req)).get('preview') === '1' ? 1 : 0, nowIso(), req.user.id]);
+    res.redirect('/account?notice=saved#push');
+  });
 
   router.get('/account', requireUser, (req, res) => {
     const notice = req.query.notice && req.t.has(`notices.${req.query.notice}`) ? req.t(`notices.${req.query.notice}`) : '';

@@ -147,8 +147,37 @@ export function inviteView({ t, invite, token, user, error = '' }) {
   });
 }
 
+// Notifications on devices (Web Push): enable this one, the subscribed
+// devices (each removable), a test, and whether the message text is shown.
+function pushSection(t, user, push) {
+  const rows = push.devices
+    .map(
+      (d) => `<li class="list-group-item d-flex justify-content-between align-items-center gap-2">
+        <div class="small"><div>${icon('bell')} ${escapeHtml(d.device || '—')}${d.active ? '' : ` <span class="badge text-bg-secondary">${escapeHtml(t('account.pushSignedOut'))}</span>`}</div>
+          <div class="text-body-secondary">${escapeHtml(t('account.pushSince', { date: fmtDate(d.created_at) }))}${d.last_sent_at ? ` · ${escapeHtml(t('account.pushLast', { date: fmtDate(d.last_sent_at) }))}` : ''}</div></div>
+        <form method="post" action="/account/push/remove"><input type="hidden" name="endpoint" value="${escapeHtml(d.endpoint)}"><button class="btn btn-sm btn-outline-danger">${escapeHtml(t('account.pushRemove'))}</button></form>
+      </li>`
+    )
+    .join('');
+  return `<section class="card mb-4" id="push"><div class="card-body">
+    <h2 class="h6 text-uppercase text-body-secondary mb-2">${escapeHtml(t('account.push'))}</h2>
+    <p class="small text-body-secondary">${escapeHtml(t('account.pushWhy'))}</p>
+    <div class="d-flex flex-wrap gap-2 mb-3">
+      <button type="button" class="btn btn-primary btn-sm" data-push-enable data-key="${escapeHtml(push.key)}">${icon('bell')} ${escapeHtml(t('account.pushEnable'))}</button>
+      <form method="post" action="/account/push/test"><button class="btn btn-outline-secondary btn-sm">${escapeHtml(t('account.pushTest'))}</button></form>
+    </div>
+    ${rows ? `<ul class="list-group mb-3">${rows}</ul>` : `<p class="small text-body-secondary">${escapeHtml(t('account.pushNone'))}</p>`}
+    <form method="post" action="/account/push/preview" class="form-check form-switch">
+      <input type="hidden" name="preview" value="${user.push_preview ? '0' : '1'}">
+      <input class="form-check-input" type="checkbox" role="switch" id="push-preview"${user.push_preview ? ' checked' : ''} data-autosubmit>
+      <label class="form-check-label small" for="push-preview">${escapeHtml(t('account.pushPreview'))}</label>
+    </form>
+    <p class="small text-body-secondary mt-2 mb-0">${escapeHtml(t('account.pushHint'))}</p>
+  </div></section>`;
+}
+
 // Account: profile, language, password, MFA, sessions.
-export function accountView({ t, user, orgs, sessions, currentHash, notice = '', error = '', mfaSetup = null, next = '', hasPassword = true, codeSent = false }) {
+export function accountView({ t, user, orgs, sessions, currentHash, notice = '', error = '', mfaSetup = null, next = '', hasPassword = true, codeSent = false, push = null }) {
   const back = orgs[0] ? `/o/${orgs[0].slug}` : '/';
   const mfa = user.mfa_enabled
     ? `<p class="mb-3"><span class="badge text-bg-success">${icon('shield')} ${escapeHtml(t('account.mfaOn'))}</span></p>
@@ -188,7 +217,7 @@ export function accountView({ t, user, orgs, sessions, currentHash, notice = '',
     t,
     title: t('account.title'),
     bodyClass: 'console-body',
-    scripts: ['console.js'],
+    scripts: push ? ['console.js', 'push.js'] : ['console.js'],
     body: `<main class="container py-4" style="max-width: 760px">
   <a class="btn btn-sm btn-link px-0 mb-2" href="${escapeHtml(back)}">${icon('chevron-left')} ${escapeHtml(t('common.back'))}</a>
   <h1 class="h4 mb-4">${escapeHtml(t('account.title'))}</h1>
@@ -225,6 +254,7 @@ export function accountView({ t, user, orgs, sessions, currentHash, notice = '',
     <h2 class="h6 text-uppercase text-body-secondary mb-3">${escapeHtml(t('account.mfa'))}</h2>
     ${mfa}
   </div></section>
+  ${push ? pushSection(t, user, push) : ''}
   <section class="card mb-4"><div class="card-body">
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h2 class="h6 text-uppercase text-body-secondary mb-0">${escapeHtml(t('account.sessions'))}</h2>

@@ -33,6 +33,22 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
+-- Web Push subscriptions, one per browser/device. Bound to the session that
+-- created it: signing out (or any session revocation) stops the device's
+-- notifications, and signing in again subscribes it again.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_hash TEXT NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  device TEXT,
+  created_at TEXT NOT NULL,
+  last_sent_at TEXT,
+  failures INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(user_id);
+
 -- Password reset and other single-use e-mail links (hash only).
 CREATE TABLE IF NOT EXISTS email_tokens (
   id TEXT PRIMARY KEY,

@@ -38,6 +38,15 @@ export function loadConfig(env = process.env) {
     maxUploadBytes: (Number(env.MAX_UPLOAD_MB) || 25) * 1024 * 1024,
     avScanCmd: env.AV_SCAN_CMD || '',
 
+    // Web Push (VAPID): `node scripts/vapid-keys.js` makes the pair; without
+    // it, push notifications are off. The subject is a contact for the push
+    // services (mailto: or https:).
+    push: {
+      publicKey: env.VAPID_PUBLIC_KEY || '',
+      privateKey: env.VAPID_PRIVATE_KEY || '',
+      subject: env.VAPID_SUBJECT || 'mailto:tech@unicorndev.eu',
+    },
+
     smtp: {
       host: env.SMTP_HOST || '',
       port: Number(env.SMTP_PORT) || 587,

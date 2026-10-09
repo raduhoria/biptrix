@@ -45,6 +45,9 @@ const MIGRATIONS = [
   // an organization leaves from its own address; account mail (sign-in
   // codes, password reset) keeps the platform sender.
   [6, ['ALTER TABLE organizations ADD COLUMN email_from TEXT', 'ALTER TABLE organizations ADD COLUMN email_from_name TEXT']],
+  // Push notifications: whether they show the message text (off: only
+  // "new message from X").
+  [7, ['ALTER TABLE users ADD COLUMN push_preview INTEGER NOT NULL DEFAULT 1']],
 ];
 
 export async function runMigrations(db) {
