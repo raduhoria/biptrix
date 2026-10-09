@@ -406,6 +406,8 @@ export default {
     newSpace: 'Grup',
     browseSpaces: 'Caută grupuri',
     newMeeting: 'Meeting nou',
+    people: 'Oameni',
+    peopleCount: '{n} persoane · {online} disponibile acum',
     meetings: 'Meetinguri',
     directMessages: 'Mesaje directe',
     spaces: 'Grupuri',

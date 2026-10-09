@@ -413,3 +413,11 @@
    screen without a scrollbar. */
 .modal-dialog-scrollable .modal-form { display: flex; flex-direction: column; min-height: 0; max-height: 100%; overflow: hidden; }
 .modal-dialog-scrollable .modal-form > .modal-body { overflow-y: auto; }
+/* People */
+.people-search { max-width: 260px; }
+.people-list { margin: 0; padding: .25rem 0; }
+.people-row { display: flex; align-items: center; gap: .75rem; padding: .55rem 1rem; border-bottom: 1px solid var(--bs-border-color-translucent); }
+.people-row:hover { background: var(--app-hover); }
+.people-actions { display: flex; gap: .15rem; opacity: .75; }
+.people-row:hover .people-actions { opacity: 1; }
+@media (max-width: 575px) { .people-search { max-width: 150px; } }

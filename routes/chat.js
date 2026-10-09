@@ -17,6 +17,7 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
   router.get('/o/:org', ...member, page);
   router.get('/o/:org/c/:id', ...member, page);
   router.get('/o/:org/meetings', ...member, page);
+  router.get('/o/:org/people', ...member, page);
 
   const api = (path) => `/api/o/:org${path}`;
   const conv = (req) => req.params.id;
