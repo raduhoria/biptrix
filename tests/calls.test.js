@@ -122,7 +122,7 @@ describe('in-call chat and calls', () => {
     a.ws.ws.close();
   });
 
-  test('Spaces do not ring; a meeting without a conversation has its own chat, shared with guests', async () => {
+  test('a Space with nobody else rings no one; a meeting without a conversation has its own chat, shared with guests', async () => {
     const space = (await anaClient.post(`${API()}/spaces`, { json: { name: 'Mare' } })).data.conversation;
     const call = await anaClient.post(`${API()}/meetings`, { json: { conversation_id: space.id, notify_members: false, call: 'video' } });
     assert.equal(call.data.ringing, 0);

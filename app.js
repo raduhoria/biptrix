@@ -63,7 +63,7 @@ export async function createApp(config, { quiet = false } = {}) {
   const isOnline = (orgId, userId) => realtime.isOnline(orgId, userId);
   const isWatching = (orgId, userId) => realtime.isWatching(orgId, userId);
   const push = createPush({ db, config });
-  const notifier = createNotifier({ db, mailer, policies, config, isOnline, isWatching, push });
+  const notifier = createNotifier({ db, mailer, policies, config, isOnline, isWatching, push, chat });
   const rooms = createRooms({ auth, orgs, meetings, media, chat, users, notifier });
   realtime = createRealtime({ config, auth, orgs, chat, events, rooms, notifier });
   const calls = createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline, isWatching, push });

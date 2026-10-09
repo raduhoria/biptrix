@@ -4,7 +4,7 @@ import path from 'node:path';
 // Versioned changes after the first release. schema.sql only creates what is
 // missing; anything that alters an existing table goes here with the next
 // version number and is applied exactly once (recorded in schema_migrations).
-const MIGRATIONS = [
+export const MIGRATIONS = [
   // Who accepted an invitation: lets the acceptance batch tell whether its
   // own conditional update won.
   [2, ['ALTER TABLE org_invites ADD COLUMN accepted_by TEXT']],
@@ -48,6 +48,22 @@ const MIGRATIONS = [
   // Push notifications: whether they show the message text (off: only
   // "new message from X").
   [7, ['ALTER TABLE users ADD COLUMN push_preview INTEGER NOT NULL DEFAULT 1']],
+  // Groups are gone (a Space does all a group did): existing groups become
+  // private Spaces whose members are all moderators (they had equal rights),
+  // named after their members when they had no name. Notifications per
+  // person and conversation: all | mentions | none (NULL = by size);
+  // "muted" becomes "none".
+  [
+    8,
+    [
+      'ALTER TABLE conversation_members ADD COLUMN notify TEXT',
+      "UPDATE conversation_members SET notify = 'none' WHERE muted = 1",
+      "UPDATE conversation_members SET role = 'moderator' WHERE conversation_id IN (SELECT id FROM conversations WHERE type = 'group')",
+      `UPDATE conversations SET type = 'space', visibility = 'private', name = COALESCE(NULLIF(TRIM(name), ''),
+         (SELECT group_concat(n, ', ') FROM (SELECT u.name AS n FROM conversation_members cm JOIN users u ON u.id = cm.user_id WHERE cm.conversation_id = conversations.id ORDER BY u.name LIMIT 4)), 'Space')
+       WHERE type = 'group'`,
+    ],
+  ],
 ];
 
 export async function runMigrations(db) {

@@ -82,8 +82,7 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
     <div class="dropdown px-3 mb-2"${boot.perms.directory || boot.perms.spaces || boot.perms.meetings ? '' : ' hidden'}>
       <button class="btn btn-primary w-100 new-btn" data-bs-toggle="dropdown">${icon('plus')} ${e('client.new')}</button>
       <ul class="dropdown-menu shadow w-100">
-        ${boot.perms.directory ? `<li><button class="dropdown-item" data-action="new-dm">${icon('user')} ${e('client.newDm')}</button></li>
-        <li><button class="dropdown-item" data-action="new-group">${icon('users')} ${e('client.newGroup')}</button></li>` : ''}
+        ${boot.perms.directory ? `<li><button class="dropdown-item" data-action="new-dm">${icon('user')} ${e('client.newDm')}</button></li>` : ''}
         ${boot.perms.spaces ? `<li><button class="dropdown-item" data-action="new-space">${icon('hash')} ${e('client.newSpace')}</button></li>
         <li><button class="dropdown-item" data-action="browse-spaces">${icon('globe')} ${e('client.browseSpaces')}</button></li>` : ''}
         ${boot.perms.meetings ? `<li><hr class="dropdown-divider"></li><li><button class="dropdown-item" data-action="new-meeting">${icon('video')} ${e('client.newMeeting')}</button></li>` : ''}

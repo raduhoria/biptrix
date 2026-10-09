@@ -7,23 +7,25 @@ const THROTTLE_MS = 10 * 60_000;
 
 // Notifications about a new message (spec §7.4).
 // - Push (core/push.js), to the recipient's devices unless they are looking
-//   at the app in that organization right now: direct messages, groups,
-//   and mentions in Spaces. The text is shown unless the person turned
-//   previews off.
+//   at the app in that organization right now, by each person's level for
+//   the conversation (all | mentions | none; core/chat.js notifyTargets):
+//   everything in DMs and small Spaces, mentions in big ones by default.
+//   The text is shown unless the person turned previews off.
 // - E-mail, for people not connected at all: mentions and direct messages,
 //   at most one per person and conversation every 10 minutes, if the org
 //   policy allows.
-// Both respect the conversation mute.
-export function createNotifier({ db, mailer, policies, config, isOnline, isWatching = () => false, push = null }) {
+// Both stay silent for "none".
+export function createNotifier({ db, mailer, policies, config, isOnline, isWatching = () => false, push = null, chat }) {
   const last = new Map();
 
   async function afterSend(org, author, conversation, message, mentioned = []) {
     if (message.kind !== 'text') return;
     const policy = await policies.get(org.id);
     const mentions = new Set(mentioned);
-    const members = conversation.type === 'space' ? [] : conversation.member_ids || [];
-    const targets = new Set([...mentions, ...members]);
+    const { all, quiet } = await chat.notifyTargets(conversation.id);
+    const targets = new Set([...mentions, ...all]);
     targets.delete(author.id);
+    for (const id of quiet) targets.delete(id);
     for (const userId of targets) {
       // Only people whose access to the organization is still valid: an
       // expired collaborator gets no previews before maintenance removes them.
@@ -33,7 +35,7 @@ export function createNotifier({ db, mailer, policies, config, isOnline, isWatch
          WHERE u.id = ? AND u.status = 'active'`,
         [conversation.id, org.id, nowIso(), userId]
       );
-      if (!row || row.muted) continue;
+      if (!row) continue;
       const t = createTranslator(row.locale || 'en');
       const preview = String(message.body).replace(/<@[A-Za-z0-9_-]+>/g, '@…').slice(0, 200);
       const name = conversation.type === 'dm' ? t('email.directMessage') : conversation.name || t('email.group');
