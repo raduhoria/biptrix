@@ -150,7 +150,7 @@ export async function createApp(config, { quiet = false } = {}) {
       await push.prune();
       await calls.sweep();
       await meetings.closeExpired();
-      for (const r of await orgs.expireCollaborators()) realtime.disconnectUser(r.user_id, r.org_id);
+      await expireAccess();
       await events.prune(7);
       await files.pruneOrphans();
       for (const row of await db.all("SELECT org_id, json_extract(data, '$.message_retention_days') AS days FROM policies WHERE json_extract(data, '$.message_retention_days') > 0")) {
@@ -172,10 +172,20 @@ export async function createApp(config, { quiet = false } = {}) {
     }
   }
   const timer = setInterval(maintenance, MAINTENANCE_MS);
+
+  // Collaborator access that just ended is revoked within a minute (not at
+  // the next 10-minute maintenance): sockets closed, removed from every
+  // conversation and from everyone's People list (member.removed).
+  async function expireAccess() {
+    for (const r of await orgs.expireCollaborators()) realtime.disconnectUser(r.user_id, r.org_id);
+  }
+  const accessTimer = setInterval(() => expireAccess().catch((err) => console.error('Access expiry failed:', err.message)), 60_000);
+  accessTimer.unref();
   timer.unref();
 
   async function close() {
     clearInterval(timer);
+    clearInterval(accessTimer);
     events.stop();
     rooms.close();
     realtime.close();

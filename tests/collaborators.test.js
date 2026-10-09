@@ -147,4 +147,20 @@ describe('external collaborators', () => {
     assert.equal(page.status, 200, page.text.slice(0, 200));
     assert.match(page.text, /gresit@altbet\.ro[\s\S]{0,400}⚠/);
   });
+  test('an expired collaborator leaves People at once, and open pages are told', async () => {
+    const ext = 'gone@partener.com';
+    await anaClient.post(`${API()}/conversations/${space.id}/invite`, { json: { email: ext } });
+    await client(app.base).post(`/invite/${inviteToken(lastMailTo(app, ext))}`, { form: { name: 'Gone' } });
+    const id = (await app.services.users.byEmail(ext)).id;
+    const people = async () => (await anaClient.get(`${API()}/bootstrap`)).data.directory.map((u) => u.id);
+    assert.ok((await people()).includes(id));
+    const ws = socket(app.base, `/ws?org=${org.slug}`, anaClient);
+    await ws.opened;
+    await app.db.run('UPDATE memberships SET access_expires_at = ? WHERE org_id = ? AND user_id = ?', [new Date(Date.now() - 1000).toISOString(), org.id, id]);
+    assert.ok(!(await people()).includes(id), 'gone from the directory before any sweep');
+    await app.services.orgs.expireCollaborators();
+    app.services.events.notify();
+    assert.equal((await ws.next('member.removed')).data.user_id, id);
+    ws.close();
+  });
 });
