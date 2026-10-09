@@ -2034,6 +2034,17 @@ for (const type of ['dragover', 'drop']) {
   });
 }
 
+// A list read at its newest messages stays there when it gets shorter or
+// taller: the on-screen keyboard opening, the composer growing, a rotated
+// phone. (Scrolled up to read older ones: left where it is.)
+function stickToBottom(el) {
+  let pinned = true;
+  el.addEventListener('scroll', () => (pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 80), { passive: true });
+  new ResizeObserver(() => pinned && (el.scrollTop = el.scrollHeight)).observe(el);
+}
+stickToBottom($('#msg-scroll'));
+stickToBottom($('#panel-body'));
+
 $('#msg-scroll').addEventListener('scroll', () => {
   const box = $('#msg-scroll');
   if (box.scrollTop < 40 && cacheFor(state.current).hasMore && !box.dataset.loading) {
