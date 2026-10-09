@@ -66,6 +66,14 @@ describe('company announcements', () => {
     assert.deepEqual(titles(await external.get(`${API()}/bootstrap`)), []);
   });
 
+  test('written by another process (no notify), still reaches open pages', async () => {
+    const ws = socket(app.base, `/ws?org=${org.slug}`, member);
+    await ws.opened;
+    await app.db.run("INSERT INTO events (org_id, type, data, node_id, created_at) VALUES (?, 'announcements.changed', '{}', 'cli', ?)", [org.id, new Date().toISOString()]);
+    await ws.next('announcements.changed', 5000);
+    ws.close();
+  });
+
   test('edit and delete, with an audit trail', async () => {
     const { id } = await app.db.get("SELECT id FROM announcements WHERE title = 'Viitor'");
     assert.match((await admin.get(`${ADMIN()}?edit=${id}`)).text, /value="Viitor"/);
