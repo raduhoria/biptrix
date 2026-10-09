@@ -293,11 +293,34 @@ function renderSidebar() {
   $('#list-direct').innerHTML = direct.map(item).join('') || `<li class="side-empty">${esc(t('noDirect'))}</li>`;
   $('#list-spaces').innerHTML = spaces.map(item).join('') || `<li class="side-empty">${esc(t('noSpaces'))}</li>`;
   renderOnlineCount();
-  // Unread total on the installed app's icon.
+  // Unread total on the installed app's icon and on the tab's icon.
   const unreadTotal = list.reduce((n, c) => n + (c.notify === 'none' ? 0 : c.unread || 0), 0);
   if (navigator.setAppBadge) (unreadTotal ? navigator.setAppBadge(unreadTotal) : navigator.clearAppBadge()).catch(() => {});
+  renderFavicon(unreadTotal);
+  // Phones: the back arrow of a conversation counts what waits elsewhere
+  // (red when someone mentioned me there).
+  const others = list.filter((c) => c.id !== state.current && c.notify !== 'none' && c.unread > 0);
+  const waiting = others.reduce((n, c) => n + c.unread, 0);
+  for (const b of $$('.back-badge')) {
+    b.hidden = !waiting;
+    b.textContent = waiting > 99 ? '99+' : waiting;
+    b.classList.toggle('mention', others.some((c) => c.mentions));
+  }
   const total = list.reduce((n, c) => n + (c.id === state.current && isVisible() ? 0 : c.unread || 0), 0);
   document.title = `${total ? `(${total}) ` : ''}${ORG.name}`;
+}
+
+// The tab's icon: the logo with a red count when something is unread.
+let faviconCount = -1;
+function renderFavicon(n) {
+  if (n === faviconCount) return;
+  faviconCount = n;
+  const link = document.querySelector('link[rel="icon"]');
+  if (!link) return;
+  const label = n > 9 ? '9+' : String(n);
+  link.href = !n
+    ? '/favicon.svg'
+    : `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="9" fill="#4f46e5"/><path d="M9 10h9a4 4 0 0 1 0 8h-5v4l-4-4v-8Z" fill="#fff"/><circle cx="${label.length > 1 ? 21 : 23}" cy="9" r="${label.length > 1 ? 11 : 9}" fill="#ef4444" stroke="#fff" stroke-width="1.5"/><text x="${label.length > 1 ? 21 : 23}" y="13.2" font-family="Arial,sans-serif" font-size="${label.length > 1 ? 11 : 13}" font-weight="700" fill="#fff" text-anchor="middle">${label}</text></svg>`)}`;
 }
 
 // Re-render the places that show presence (cheap at this scale).

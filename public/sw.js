@@ -22,6 +22,8 @@ async function onPush(d) {
     for (const n of await reg.getNotifications({ tag: d.tag })) n.close();
     return;
   }
+  // Unread count on the installed app's icon (where supported).
+  if (Number.isInteger(d.badge) && self.navigator.setAppBadge) await (d.badge ? self.navigator.setAppBadge(d.badge) : self.navigator.clearAppBadge()).catch(() => {});
   // Already looking at that conversation: nothing to show.
   if (d.type === 'message' && (await focusedOn(d.url))) return;
   const call = d.type === 'call';

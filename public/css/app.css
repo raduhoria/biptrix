@@ -438,6 +438,11 @@
 .ann-body { margin-top: .2rem; color: var(--bs-secondary-color); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 .ann.open .ann-body { display: block; }
 .ann-toggle { font-size: .78rem; }
+/* Phones: unread elsewhere, on a view's back arrow. */
+.back-btn { position: relative; }
+.back-badge { position: absolute; top: -.1rem; right: -.35rem; min-width: 1.15rem; height: 1.15rem; padding: 0 .3rem; border-radius: 999px; background: var(--brand); color: #fff; font-size: .68rem; font-weight: 700; line-height: 1.15rem; text-align: center; box-shadow: 0 0 0 2px var(--bs-body-bg); }
+.back-badge.mention { background: #dc3545; }
+.back-badge[hidden] { display: none; }
 .ann-dot { display: inline-block; width: .55rem; height: .55rem; border-radius: 50%; background: #4f46e5; vertical-align: .05rem; }
 .ann-dot.ann-warning { background: #d97706; }
 .ann-dot.ann-success { background: #16a34a; }
