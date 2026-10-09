@@ -86,7 +86,7 @@ describe('push notifications', () => {
       return new Response('', { status });
     };
     const keys = generateVapidKeys();
-    app = await startApp({ VAPID_PUBLIC_KEY: keys.publicKey, VAPID_PRIVATE_KEY: keys.privateKey });
+    app = await startApp({ VAPID_PUBLIC_KEY: keys.publicKey, VAPID_PRIVATE_KEY: keys.privateKey, CALL_RERING_MS: '250' });
     org = await app.org('Push');
     ana = await app.user(org, { email: 'ana@p.ro', name: 'Ana' });
     bob = await app.user(org, { email: 'bob@p.ro', name: 'Bob' });
@@ -183,6 +183,8 @@ describe('push notifications', () => {
     assert.match(ring.payload.accept_url, new RegExp(`/meet/${meeting.id}\\?call=audio$`));
     assert.match(ring.payload.decline_url, new RegExp(`/meetings/${meeting.id}/ring$`));
     assert.ok(ring.payload.actions.accept && ring.payload.actions.decline);
+    // A push sounds once: while it rings, the call is pushed again.
+    assert.ok(await until(() => sent.filter((s) => s.payload.type === 'call').length >= 3), 'rings again');
     // The caller hangs up before an answer: "missed" on Bob's devices.
     const room = socket(app.base, `/ws/meeting?id=${meeting.id}`, anaClient);
     await room.opened;
@@ -191,6 +193,21 @@ describe('push notifications', () => {
     room.ws.close();
     assert.ok(await until(() => sent.some((s) => s.payload.type === 'missed')));
     assert.equal(sent.find((s) => s.payload.type === 'missed').payload.tag, `call-${meeting.id}`);
+    // ...and no more rings after that.
+    await new Promise((r) => setTimeout(r, 700));
+    const lastMissed = sent.findLastIndex((s) => s.payload.type === 'missed');
+    assert.ok(!sent.slice(lastMissed + 1).some((s) => s.payload.type === 'call'), 'no ring after missed');
+  });
+
+  test('declining stops the rings', async () => {
+    sent.length = 0;
+    const meeting = (await anaClient.post(`${API()}/meetings`, { json: { conversation_id: dm.id, notify_members: false, call: 'video' } })).data.meeting;
+    assert.ok(await until(() => sent.filter((s) => s.payload.type === 'call').length >= 2));
+    await bobClient.post(`${API()}/meetings/${meeting.id}/ring`, { json: { answer: 'decline' } });
+    await new Promise((r) => setTimeout(r, 150));
+    const count = sent.filter((s) => s.payload.type === 'call').length;
+    await new Promise((r) => setTimeout(r, 800));
+    assert.equal(sent.filter((s) => s.payload.type === 'call').length, count);
   });
 
   test('signing out stops the device; a gone subscription is forgotten; the account page lists devices', async () => {

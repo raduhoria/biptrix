@@ -5,6 +5,9 @@ import { orgSender } from './mailer.js';
 import { SMALL_SPACE } from './chat.js';
 
 export const RING_MS = 45_000;
+// A push notification sounds once; while a call rings it is sent again at
+// this interval (same tag, renotify), so a closed app keeps ringing.
+export const RE_RING_MS = 6_000;
 const HANG_UP_GRACE_MS = 15_000;
 const MAX_RING = SMALL_SPACE; // larger Spaces get the meeting card, no ringing
 
@@ -22,8 +25,38 @@ const MAX_RING = SMALL_SPACE; // larger Spaces get the meeting card, no ringing
 //              callees who were not connected, the meeting closed.
 // The deadline is a timer on this node, with the maintenance sweep as the
 // fallback after a restart.
-export function createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline, isWatching = () => false, push = null }) {
+export function createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline, isWatching = () => false, push = null, reRingMs = RE_RING_MS }) {
   const timers = new Map();
+  // meetingId → { users: callees whose devices still ring, timer }
+  const reRings = new Map();
+
+  function endReRing(meetingId) {
+    clearInterval(reRings.get(meetingId)?.timer);
+    reRings.delete(meetingId);
+  }
+
+  // Rings again the devices of those who neither answered nor declined, as
+  // long as the call rings (checked in the database: another node may have
+  // taken the answer) and not in the last moments before the deadline.
+  function startReRing(org, meeting, targets, extra) {
+    endReRing(meeting.id);
+    if (!push?.enabled) return;
+    const entry = { users: new Set(targets) };
+    entry.timer = setInterval(async () => {
+      try {
+        const now = await meetings.byId(meeting.id);
+        if (now?.ring_state !== 'ringing' || Date.now() > Date.parse(extra.until) - reRingMs / 2) return endReRing(meeting.id);
+        const joined = new Set((await db.all('SELECT user_id FROM meeting_participants WHERE meeting_id = ? AND user_id IS NOT NULL', [meeting.id])).map((r) => r.user_id));
+        const users = [...entry.users].filter((id) => !joined.has(id));
+        if (!users.length) return endReRing(meeting.id);
+        await pushCall(org, meeting, users, 'ring', extra);
+      } catch (err) {
+        console.error('Call re-ring failed:', err.message);
+      }
+    }, reRingMs);
+    entry.timer.unref?.();
+    reRings.set(meeting.id, entry);
+  }
 
   // Push to the callees' devices (the app may be closed): the ring, with
   // answer/decline, until the deadline; then "over" or "missed", which
@@ -71,6 +104,7 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
     ]);
     events.notify();
     pushCall(org, meeting, targets, 'ring', { caller, callKind: kind, until }).catch(() => {});
+    startReRing(org, meeting, targets, { caller, callKind: kind, until });
     clearTimeout(timers.get(meeting.id));
     const timer = setTimeout(() => deadline(meeting.id).catch((err) => console.error('Call deadline failed:', err.message)), RING_MS + 500);
     timer.unref?.();
@@ -80,6 +114,11 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
 
   async function stopFor(orgId, meetingId, userIds, { pushed = true } = {}) {
     if (!userIds.length) return;
+    const reRing = reRings.get(meetingId);
+    if (reRing) {
+      for (const id of userIds) reRing.users.delete(id);
+      if (!reRing.users.size) endReRing(meetingId);
+    }
     await db.batch(userIds.map((userId) => events.statement({ orgId, userId, type: 'call.stop', data: { meeting_id: meetingId } })));
     events.notify();
     if (pushed && push?.enabled) {
@@ -176,5 +215,13 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
     for (const { id } of late) await deadline(id);
   }
 
-  return { ring, respond, sweep, close: () => timers.forEach((t) => clearTimeout(t)) };
+  return {
+    ring,
+    respond,
+    sweep,
+    close: () => {
+      timers.forEach((t) => clearTimeout(t));
+      for (const id of [...reRings.keys()]) endReRing(id);
+    },
+  };
 }
