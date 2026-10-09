@@ -370,7 +370,7 @@ export default {
     callVideo: 'video',
     footer: 'You received this because an organization uses {brand}. Do not reply to this e-mail.',
     codeIgnore: 'If you did not ask for this code, ignore this message: your account stays safe.',
-    mentionLead: 'You have a new message in {conversation} ({org}):',
+    mentionLead: 'You have a new message in {conversation} ({org}). For privacy, the text is not included in e-mails: read it in BipTrix.',
     orgInviteTitle: 'Invitation to {org}',
     orgInviteIntro: '{inviter} invited you to join {org} on {brand}.',
     orgInviteButton: 'Accept invitation',

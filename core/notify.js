@@ -13,7 +13,7 @@ const THROTTLE_MS = 10 * 60_000;
 //   The text is shown unless the person turned previews off.
 // - E-mail, for people not connected at all: mentions and direct messages,
 //   at most one per person and conversation every 10 minutes, if the org
-//   policy allows.
+//   policy allows. Informative only: who wrote and where, never the text.
 // Both stay silent for "none".
 export function createNotifier({ db, mailer, policies, config, isOnline, isWatching = () => false, push = null, chat }) {
   const last = new Map();
@@ -67,7 +67,7 @@ export function createNotifier({ db, mailer, policies, config, isOnline, isWatch
       mailer.queue({
         to: row.email,
         sender: orgSender(org),
-        ...mentionEmail({ t, org: org.name, author: author.name, conversation: name, preview, url }),
+        ...mentionEmail({ t, org: org.name, author: author.name, conversation: name, url }),
       });
     }
     if (last.size > 10_000) last.clear();

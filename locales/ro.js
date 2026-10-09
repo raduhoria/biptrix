@@ -371,7 +371,7 @@ export default {
     callVideo: 'video',
     footer: 'Ai primit acest mesaj pentru că o organizație folosește {brand}. Nu răspunde la acest e-mail.',
     codeIgnore: 'Dacă nu ai cerut tu acest cod, ignoră mesajul: contul tău rămâne în siguranță.',
-    mentionLead: 'Ai un mesaj nou în {conversation} ({org}):',
+    mentionLead: 'Ai un mesaj nou în {conversation} ({org}). Din motive de confidențialitate, textul nu apare în e-mail: îl citești în BipTrix.',
     orgInviteTitle: 'Invitație în {org}',
     orgInviteIntro: '{inviter} te-a invitat să te alături organizației {org} pe {brand}.',
     orgInviteButton: 'Acceptă invitația',
