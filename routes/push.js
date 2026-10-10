@@ -23,6 +23,10 @@ export function registerPushRoutes(router, { auth, push, config }) {
     start_url: '/',
     scope: '/',
     display: 'standalone',
+    // Links to the app (a call answered from a notification) open in the
+    // installed app where the browser supports it.
+    handle_links: 'preferred',
+    launch_handler: { client_mode: 'auto' },
     background_color: '#111318',
     theme_color: '#4f46e5',
     icons: [
