@@ -588,10 +588,12 @@ function ringTone() {
   }
 }
 
-// The meeting tab is opened right away (still inside the click, so it is
-// not blocked as a pop-up) and pointed at the room once the server answered.
-function openCallTab() {
-  const w = window.open('about:blank', '_blank');
+// The meeting window is opened right away (still inside the click, so it
+// is not blocked as a pop-up) and pointed at the room once the server
+// answered. It starts on a page of the app, not about:blank: the installed
+// app opens its own pages in an app window, anything else in the browser.
+function openCallTab(url = `/o/${ORG.slug}/calling`) {
+  const w = window.open(url, '_blank');
   if (w) w.opener = null;
   return w;
 }
@@ -599,10 +601,10 @@ function openCallTab() {
 async function answerCall(answer) {
   const d = ringing.call;
   if (!d) return;
-  const w = answer === 'accept' ? openCallTab() : null;
+  // The room's address is known: opened directly.
+  if (answer === 'accept') openCallTab(`/o/${ORG.slug}/meet/${d.meeting_id}?call=${d.kind}`);
   stopRinging();
   api(`${API}/meetings/${d.meeting_id}/ring`, { method: 'POST', body: { answer } }).catch(() => {});
-  if (w) w.location = `/o/${ORG.slug}/meet/${d.meeting_id}?call=${d.kind}`;
 }
 
 document.addEventListener('click', (e) => {

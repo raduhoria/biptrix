@@ -3,6 +3,7 @@ import { readJson } from '../core/router.js';
 import { appError, canonicalEmail, isEmail } from '../core/util.js';
 import { spaceInviteEmail } from '../views/emails.js';
 import { chatView } from '../views/app.js';
+import { escapeHtml, page as layoutPage } from '../views/layout.js';
 
 // Chat pages and JSON API under /api/o/:org (spec §14). The WebSocket is the
 // primary path for sending (core/realtime.js); POST .../messages is the HTTP
@@ -18,6 +19,12 @@ export function registerChatRoutes(router, { auth, orgs, chat, files, policies, 
   router.get('/o/:org/c/:id', ...member, page);
   router.get('/o/:org/meetings', ...member, page);
   router.get('/o/:org/people', ...member, page);
+  // What a new call window shows while the call is being set up. It is a
+  // page of the app (unlike about:blank), so the installed app opens it in
+  // its own window, not in a browser tab.
+  router.get('/o/:org/calling', ...member, (req, res) =>
+    res.send(layoutPage({ t: req.t, title: req.t('client.connecting'), bodyClass: 'meet-body', body: `<div class="d-flex flex-column align-items-center justify-content-center h-100 gap-3"><div class="spinner-border" role="status"></div><div>${escapeHtml(req.t('client.connecting'))}</div></div>` }))
+  );
 
   const api = (path) => `/api/o/:org${path}`;
   const conv = (req) => req.params.id;

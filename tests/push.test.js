@@ -246,6 +246,11 @@ describe('push notifications', () => {
     const manifest = await client(app.base).get('/manifest.webmanifest');
     assert.equal(manifest.data.display, 'standalone');
     assert.ok(manifest.data.icons.some((i) => i.sizes === '512x512'));
+    assert.equal(manifest.data.handle_links, 'preferred');
+    // A new call window starts on a page of the app (opens in the app).
+    const calling = await bobClient.get(`${API()}`.replace('/api', '') + '/calling');
+    assert.equal(calling.status, 200);
+    assert.match(calling.text, /spinner-border/);
   });
 
   test('noise suppression assets: the WebAssembly is served and allowed to compile', async () => {
