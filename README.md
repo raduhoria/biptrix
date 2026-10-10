@@ -42,7 +42,7 @@ to the console.
 | Delivery | Each conversation has a `seq`. Sends are idempotent on `client_message_id`. The ACK `persisted` is sent only after commit. A durable event log (`events`) has a monotonic `event_id`. Clients catch up with `system.sync {since}`. The browser keeps a local outbox for offline sends. |
 | Files | Uploads are streamed with an extension allowlist and magic-byte checks. Optional antivirus (`AV_SCAN_CMD`), quotas, opaque ids, storage outside the webroot, and authorized download. |
 | Search | FTS5 that ignores diacritics. Scoped to the caller's conversations. Filters: conversation, author, date. Also searches file names. |
-| Meetings | Instant or scheduled meetings, and calls from a DM or Space (posted as a card in the conversation). WebRTC mesh with lobby, host/co-host, admit, remove, end for all, screen share, active speaker. Microphone, camera and speaker can be changed during a call; optional AI noise suppression (RNNoise, WebAssembly, in the browser). Full screen per tile; shared screens keep their resolution. Each tile shows its connection (P2P, P2P · TURN, SFU), bitrate and latency. The header shows whether the call is **end-to-end encrypted** (green lock: peer to peer, directly or through TURN) or goes **through the media server** (amber shield: above `MESH_MAX_PARTICIPANTS`, via the SFU), live, with an explanation on tap. Calls survive dropped sockets and server restarts. |
+| Meetings | Instant or scheduled meetings, and calls from a DM or Space (posted as a card in the conversation). WebRTC mesh with lobby, host/co-host, admit, remove, end for all, screen share, active speaker. Microphone, camera and speaker can be changed during a call; optional AI noise suppression (RNNoise, WebAssembly, in the browser). Full screen per tile; shared screens keep their resolution. Each tile shows its connection (P2P, P2P · TURN, SFU), bitrate and latency. Calls are **end-to-end encrypted** on every path, peer to peer and through the SFU (see WebRTC → End-to-end encryption); the header shows a green lock once keys are exchanged with everyone, and on tap the verification code. Calls survive dropped sockets and server restarts. |
 | Calls | Audio or video call from a DM or a Space of up to 20 people: every tab and device of the others rings (incoming-call screen, ring tone, answer/decline) for 45 s. A push notification sounds once, so on a closed app the call is pushed again every 6 s (`CALL_RERING_MS`) until it is answered, declined, missed or over. Answered, declined, or missed: a "missed call" line in the conversation, an e-mail if they were offline. Bigger Spaces get the card only, no ringing; nobody with notifications off is rung. |
 | Push notifications | Web Push (VAPID, RFC 8291 encryption, `node:crypto` only), delivered by each browser's own push service — Google FCM (Chrome, Edge, Android), Apple (Safari, iPhone), Mozilla (Firefox); not Cloudflare. They only carry the payload encrypted to the device and cannot read it. direct messages, Space messages by each person's level, mentions, calls (answer/decline in the notification) and missed calls reach phones and computers with the app closed, unless the app is on screen. Installable app (manifest, service worker); on iPhone it works from the home-screen app. Each device subscription belongs to its session (signing out stops it); Contul meu lists devices, sends a test, and can hide message text. Keys: `node scripts/vapid-keys.js` → `VAPID_*` in the environment. |
 | In-call chat | A call from a conversation chats in that conversation (its members only; the messages stay there). Other meetings have their own chat, shared with admitted guests, with history for late joiners and subject to message retention. |
@@ -115,12 +115,34 @@ parameter (consistent hash).
     people ~360p 400 kbps — about 2 Mbps of upload in total at any size.
   - `mesh`: always peer-to-peer (capped at the mesh size); `sfu`: always SFU.
   - Without `CF_SFU_APP_ID` / `CF_SFU_APP_TOKEN` it is always mesh.
-  - **Privacy.** Peer-to-peer media is encrypted between the participants
-    (DTLS-SRTP); a TURN relay only forwards it. Through the SFU, Cloudflare
-    terminates the media. The org policy "calls above 6 people may go through
-    Cloudflare SFU" (`media_sfu_allowed`) turned off keeps every call of that
-    organization peer-to-peer, capped at 6 (it is fixed per meeting when the
-    meeting is created).
+  - **End-to-end encryption** (`public/js/e2ee*.js`), on every path, on top
+    of DTLS-SRTP. Every encoded frame (audio, camera, screen) is encrypted in
+    the browser with WebRTC Encoded Transform (`RTCRtpScriptTransform`, in a
+    worker; AES-GCM 256, a fresh IV per frame). The codec header stays in
+    clear (Opus 1 byte, VP8 10/3 bytes) but authenticated, so the SFU still
+    forwards; video is negotiated in VP8 for that. A frame carries the
+    sender's 4-byte tag and key index.
+    - Keys are ephemeral, made in the page, never stored. Each participant
+      has an ECDH P-256 pair (private key not exportable) and its own frame
+      key, sent to each other participant wrapped with an HKDF key from
+      their ECDH secret (bound to both ids, tag, index). The server relays
+      only public and wrapped keys through `signal`; nothing changed
+      server-side.
+    - Whenever someone joins or leaves, everyone makes a new frame key, used
+      1.5 s later (receivers keep the last 4): who left cannot read what
+      follows, who joins cannot read what came before.
+    - Verification code: 6 emoji (36 bits) from a SHA-256 of every
+      participant's id and public key; the same on every screen means
+      nobody (not our server, not the proxy) swapped keys.
+    - Nothing leaves or is shown unencrypted: frames without a key are
+      dropped. A browser without `RTCRtpScriptTransform` cannot join a call
+      (recent Chrome, Edge, Firefox, Safari all have it).
+    - Tested with real Chrome: 2 people P2P, 3 through the real Cloudflare
+      SFU, moves P2P → SFU → P2P with rekeying (same code everywhere), and
+      a participant whose decryption was disabled decoding 0 video frames.
+  - `media_sfu_allowed` turned off keeps every call of that organization
+    peer-to-peer, capped at 6 (fixed per meeting when it is created); with
+    the encryption above it is no longer a privacy trade-off.
   - **SFU** (`core/sfu.js`): one session per participant. Every push and pull
     goes through `/ws/meeting` and the server, so the token never reaches the
     browser and a pull only works between admitted participants of the same
@@ -152,26 +174,15 @@ parameter (consistent hash).
   content); the internal DNS sends the office network straight to the host.
 - Notification e-mails never contain message text. Push payloads are
   encrypted to the device (RFC 8291); each person can hide the text there too.
-- Calls: see the encryption badge (Meetings) and `media_sfu_allowed`.
+- Calls are end-to-end encrypted, also through Cloudflare's SFU (which
+  forwards frames it cannot read); participants can compare the
+  verification code.
 
 ## Not done yet (next phases)
 
 - F1: none.
 - F3: Shared Spaces between organizations (the schema allows it; grants and the "most restrictive policy wins" rule are missing).
 - F4: simulcast (lower resolution for thumbnails in large meetings).
-- End-to-end encryption over the SFU, so calls above `MESH_MAX_PARTICIPANTS`
-  stay end-to-end encrypted (the badge stays green and `media_sfu_allowed`
-  is no longer a trade-off):
-  - frames encrypted in the browser with WebRTC Encoded Transform
-    (`RTCRtpScriptTransform`, in a worker; AES-GCM), codec header left in
-    clear so the SFU can still forward; audio, camera and screen;
-  - keys never seen by our server or Cloudflare's proxy: each participant
-    makes an ECDH key pair in the browser, the server relays only public
-    keys, the call key is wrapped per participant; optional verification
-    code against an active man in the middle;
-  - new key whenever someone joins or leaves, without freezing the picture,
-    across the P2P ↔ SFU moves;
-  - first a prototype with three browsers on the real Cloudflare SFU.
 - F5: cross-node presence and typing, rqlite load tests, billing.
 - P1/P2: SSO (OIDC/SAML), external calendar, recordings, native apps.
 - Backup: `deploy/biptrix-backup` (database, files, secret, with a restore check); rqlite deployments use rqlite's own backups.

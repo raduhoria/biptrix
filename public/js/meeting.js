@@ -1,3 +1,4 @@
+import { createE2ee, e2eeSupported } from './e2ee.js';
 import { $, $$, api, esc, fitViewport, hue, icon, initials, randomId, translator } from './lib.js';
 
 fitViewport();
@@ -60,6 +61,42 @@ const state = {
 };
 // From a call (?call=audio|video): the camera follows the call kind.
 if (boot.call) state.cam = boot.call === 'video';
+
+// End-to-end encryption of the media (e2ee.js), on every path. A browser
+// without encoded transforms cannot take part: it could neither encrypt
+// nor read the others.
+const e2ee = e2eeSupported() ? createE2ee({ signal: (to, data) => send('signal', { to, data }), onChange: () => renderSecurity() }) : null;
+const VIDEO_CODECS = /video\/(vp8|rtx|red|ulpfec|flexfec)/i;
+
+// Encrypt/decrypt a transceiver's frames; video in VP8, whose header the
+// encryption leaves readable (another codec could break packetization).
+function secure(tr, kind) {
+  if (!e2ee || !tr) return;
+  if (kind === 'video' && tr.setCodecPreferences) {
+    const codecs = (RTCRtpReceiver.getCapabilities('video')?.codecs || []).filter((c) => VIDEO_CODECS.test(c.mimeType));
+    if (codecs.some((c) => /vp8/i.test(c.mimeType))) {
+      try {
+        tr.setCodecPreferences(codecs.sort((a, b) => /vp8/i.test(b.mimeType) - /vp8/i.test(a.mimeType)));
+      } catch {
+        // Already negotiated: kept as is.
+      }
+    }
+  }
+  e2ee.attach(tr.sender, kind, 'send');
+  e2ee.attach(tr.receiver, kind, 'recv');
+}
+
+// The participants e2ee exchanges keys with: synced once per task, so a
+// peer rebuilt (removed and added back at once) is not a change.
+let e2eeSyncQueued = false;
+function syncE2ee() {
+  if (!e2ee || e2eeSyncQueued) return;
+  e2eeSyncQueued = true;
+  queueMicrotask(() => {
+    e2eeSyncQueued = false;
+    e2ee.setPeers([...state.peers.keys()]);
+  });
+}
 
 function stage(name) {
   root.dataset.stage = name;
@@ -504,6 +541,7 @@ function onJoined(d) {
   const resuming = resume.active && state.joined;
   state.joined = true;
   state.self = d.self;
+  e2ee?.start(d.self.id);
   state.iceServers = d.ice_servers;
   state.icePolicy = d.ice_policy || 'all';
   state.canManage = d.can_manage;
@@ -703,6 +741,7 @@ async function sfuStart() {
   const pc = new RTCPeerConnection({ iceServers: state.iceServers, iceTransportPolicy: state.icePolicy, bundlePolicy: 'max-bundle' });
   const sfu = (state.sfu = { pc, senders: {}, screen: null, midMap: new Map(), pulled: new Map(), failures: new Map(), queue: Promise.resolve(), connected: false });
   pc.ontrack = (e) => {
+    e2ee?.attach(e.receiver, e.track.kind, 'recv');
     const target = sfu.midMap.get(e.transceiver.mid);
     const peer = target && state.peers.get(target.pid);
     if (!peer) return;
@@ -729,6 +768,8 @@ async function sfuStart() {
   await sfuEnqueue(async () => {
     sfu.senders.audio = pc.addTransceiver(sfuTrackFor('audio'), { direction: 'sendonly' });
     sfu.senders.camera = pc.addTransceiver(sfuTrackFor('camera'), { direction: 'sendonly' });
+    secure(sfu.senders.audio, 'audio');
+    secure(sfu.senders.camera, 'video');
     await pc.setLocalDescription(await pc.createOffer());
     const res = await request('sfu.push', { sdp: pc.localDescription, tracks: [{ mid: sfu.senders.audio.mid, slot: 'audio' }, { mid: sfu.senders.camera.mid, slot: 'camera' }] });
     await pc.setRemoteDescription(res.sdp);
@@ -782,6 +823,7 @@ function sfuScreenOn() {
   if (!sfu?.connected || !state.local.screen) return;
   return sfuEnqueue(async () => {
     sfu.screen = sfu.pc.addTransceiver(state.local.screen, { direction: 'sendonly' });
+    secure(sfu.screen, 'video');
     await sfu.pc.setLocalDescription(await sfu.pc.createOffer());
     const res = await request('sfu.push', { sdp: sfu.pc.localDescription, tracks: [{ mid: sfu.screen.mid, slot: 'screen' }] });
     await sfu.pc.setRemoteDescription(res.sdp);
@@ -812,6 +854,7 @@ function addPeer(info, initiator = false) {
   if (state.peers.has(info.id)) removePeer(info.id);
   const peer = { info, initiator, pc: null, pendingIce: [], stream: new MediaStream(), screen: new MediaStream(), tile: null, screenTile: null, level: 0, meshTracks: {}, sfuGot: new Set() };
   state.peers.set(info.id, peer);
+  syncE2ee();
   createTile(peer);
   if (initiator) startCall(peer);
   capAll();
@@ -822,6 +865,7 @@ function createPc(peer) {
   peer.pc = pc;
   pc.onicecandidate = (e) => e.candidate && send('signal', { to: peer.info.id, data: { candidate: e.candidate } });
   pc.ontrack = (e) => {
+    e2ee?.attach(e.receiver, e.track.kind, 'recv');
     const slot = SLOT_NAMES[pc.getTransceivers().indexOf(e.transceiver)];
     peer.meshTracks[slot] = e.track;
     // While the SFU still carries this peer, switch only once this
@@ -857,7 +901,7 @@ function localTrackFor(slot) {
 
 async function startCall(peer) {
   const pc = createPc(peer);
-  for (const kind of ['audio', 'video', 'video']) pc.addTransceiver(kind, { direction: 'sendrecv' });
+  for (const kind of ['audio', 'video', 'video']) secure(pc.addTransceiver(kind, { direction: 'sendrecv' }), kind);
   pc.getTransceivers().forEach((tr, i) => tr.sender.replaceTrack(localTrackFor(i)));
   await offer(peer);
 }
@@ -905,6 +949,7 @@ const capAll = () => {
 };
 
 async function onSignal(from, data) {
+  if (data?.e2ee) return e2ee?.onSignal(from, data.e2ee);
   let peer = state.peers.get(from);
   if (!peer) return;
   if (data.rebuild) {
@@ -924,6 +969,7 @@ async function onSignal(from, data) {
         await peer.pc.setRemoteDescription(data.sdp);
         // The offer created our three transceivers; attach local tracks.
         peer.pc.getTransceivers().forEach((tr, i) => {
+          secure(tr, i === SLOT.audio ? 'audio' : 'video');
           tr.direction = 'sendrecv';
           tr.sender.replaceTrack(localTrackFor(i));
         });
@@ -950,6 +996,7 @@ function removePeer(id) {
   peer.tile?.remove();
   peer.screenTile?.remove();
   state.peers.delete(id);
+  syncE2ee();
   capAll();
   if (state.sfu) sfuDrop();
   layout();
@@ -1062,19 +1109,28 @@ function leaveSfu() {
   }
 }
 
-// Whether the call is end-to-end encrypted, for everyone in it: peer to
-// peer (directly or through a TURN relay, which only forwards encrypted
-// packets) it is; through the SFU the media server can see the media. While
-// moving back from the SFU it still counts as "through the SFU" until the
-// SFU session is gone.
+// The call's encryption, for everyone in it: green once keys are exchanged
+// with every participant (peer to peer or through the SFU, which only
+// forwards encrypted frames), amber while they are being exchanged. The
+// explanation carries the verification code.
 function renderSecurity() {
   const el = $('#sec-badge');
-  const e2e = state.topology !== 'sfu' && !state.sfu;
+  const ok = e2ee?.status() === 'ok';
   el.hidden = !state.joined;
-  el.classList.toggle('e2e', e2e);
-  el.innerHTML = `${icon(e2e ? 'lock' : 'shield')}<span>${esc(t(e2e ? 'meet.secE2e' : 'meet.secSfu'))}</span>`;
-  el.title = t(e2e ? 'meet.secE2eInfo' : 'meet.secSfuInfo', { n: boot.meshMax });
-  if (!$('#sec-info').hidden) $('#sec-info').textContent = el.title;
+  el.classList.toggle('e2e', ok);
+  el.innerHTML = `${icon(ok ? 'lock' : 'shield')}<span>${esc(t(ok ? 'meet.secE2e' : 'meet.secPending'))}</span>`;
+  const code = state.peers.size ? e2ee?.code() : '';
+  const path = t(state.topology === 'sfu' || state.sfu ? 'meet.secPathSfu' : 'meet.secPathP2p');
+  el.title = `${t(ok ? 'meet.secE2eInfo' : 'meet.secPendingInfo', { path })}${code ? `\n\n${t('meet.secCode', { code })}` : ''}`;
+  el.dataset.code = code || '';
+  if (!$('#sec-info').hidden) fillSecInfo();
+}
+
+// The explanation, with the verification code large enough to read out.
+function fillSecInfo() {
+  const el = $('#sec-badge');
+  const code = el.dataset.code;
+  $('#sec-info').innerHTML = code ? esc(el.title).replace(esc(code), `<span class="sec-code">${esc(code)}</span>`) : esc(el.title);
 }
 
 function moveTo(topology) {
@@ -1485,7 +1541,7 @@ root.addEventListener('click', async (e) => {
       // The explanation, under the header; a tap (or 10 s) hides it.
       const info = $('#sec-info');
       info.hidden = !info.hidden;
-      info.textContent = $('#sec-badge').title;
+      fillSecInfo();
       clearTimeout(info.timer);
       if (!info.hidden) info.timer = setTimeout(() => (info.hidden = true), 10_000);
       return;
@@ -1501,6 +1557,7 @@ root.addEventListener('click', async (e) => {
       if (confirm(t('meet.endConfirm'))) send('end');
       return;
     case 'join':
+      if (!e2ee) return setEnded('meet.e2eeUnsupportedTitle', 'meet.e2eeUnsupportedText');
       btn.disabled = true;
       if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
       return connect();
@@ -1557,7 +1614,8 @@ setInterval(() => {
   await listDevices().catch(() => {});
   renderPreview();
   // A call goes straight into the room.
-  if (boot.call) {
+  if (boot.call && !e2ee) setEnded('meet.e2eeUnsupportedTitle', 'meet.e2eeUnsupportedText');
+  else if (boot.call) {
     $('[data-action="join"]').disabled = true;
     connect();
   }
