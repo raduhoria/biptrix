@@ -1204,12 +1204,14 @@ async function openThread(parentId) {
   $('#panel-body').innerHTML = `<div class="msg-loading"><div class="spinner-border spinner-border-sm"></div></div>`;
   const c = state.conversations.get(state.current);
   // Same rule as conversations: events received meanwhile are merged, and
-  // only the newest load of the thread is installed.
+  // only the newest load of the thread is installed — an older one that
+  // answers last (overlapping opens) is dropped.
+  if (state.threadLoad) state.threadLoad.superseded = true;
   const load = (state.threadLoad = { parentId, arriving: [] });
   const data = await api(`${API}/conversations/${c.id}/messages?parent=${encodeURIComponent(parentId)}&limit=200`).finally(() => {
     if (state.threadLoad === load) state.threadLoad = null;
   });
-  if (state.threadLoad || state.thread !== parentId) return;
+  if (load.superseded || state.threadLoad || state.thread !== parentId) return;
   const thread = { parent: data.parent, list: data.messages };
   for (const m of load.arriving) {
     if (m.id === parentId) {

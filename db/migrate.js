@@ -64,6 +64,16 @@ export const MIGRATIONS = [
        WHERE type = 'group'`,
     ],
   ],
+  // "Ring into" a meeting under way, kept on the invitation (not in one
+  // node's memory): until when the person rings, who rang, audio|video.
+  [
+    9,
+    [
+      'ALTER TABLE meeting_invitations ADD COLUMN ring_until TEXT',
+      'ALTER TABLE meeting_invitations ADD COLUMN ring_by TEXT',
+      'ALTER TABLE meeting_invitations ADD COLUMN ring_kind TEXT',
+    ],
+  ],
 ];
 
 export async function runMigrations(db) {

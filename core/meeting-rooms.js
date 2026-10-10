@@ -168,7 +168,10 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
         ? await meetings.joinAsGuest(await meetings.guestFromToken(ws.ctx.guestToken), data.name)
         : await meetings.joinAsMember(meeting, ws.ctx.user);
     ws.participant = participant;
-    ws.media = { audio: !!data.audio, video: !!data.video, screen: false };
+    // The media as the page says it is now: after a reconnect a screen that
+    // is still being shared stays shown (if this person may share).
+    const policy = JSON.parse(meeting.policy_snapshot || '{}');
+    ws.media = { audio: !!data.audio, video: !!data.video, screen: !!data.screen && (!!participant.user_id || !!policy.guest_screen_share) };
     ws.page = typeof data.page === 'string' ? data.page.slice(0, 40) : '';
     if (participant.state === 'lobby') {
       r.lobby.set(participant.id, ws);
@@ -176,7 +179,6 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
       return lobbyUpdate(r);
     }
     r.lobby.delete(participant.id);
-    const policy = JSON.parse(meeting.policy_snapshot || '{}');
     // Everything that waits on the database or the network first: from the
     // moment this connection is in r.peers until `joined` and `peer.joined`
     // are sent nothing may wait, or someone joining at the same moment

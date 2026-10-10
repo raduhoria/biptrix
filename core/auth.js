@@ -76,14 +76,20 @@ export function createAuth({ db, users, config, secretBox }) {
 
   // ---------------------------------------------------------------- sessions
 
-  async function createSession(res, req, userId, { mfaOk = false } = {}) {
+  // `passwordHash`: the session is only created if that is still the
+  // account's password (a reset or change that finished after the check
+  // wins). Returns whether it was created.
+  async function createSession(res, req, userId, { mfaOk = false, passwordHash } = {}) {
     const token = newToken();
     const at = nowIso();
-    await db.run(
-      'INSERT INTO sessions (id_hash, user_id, mfa_ok, ip, user_agent, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [sha256(token), userId, mfaOk ? 1 : 0, req.ip, String(req.headers['user-agent'] || '').slice(0, 200), at, at, isoIn(config.sessionTtlHours * 3600_000)]
+    const guard = passwordHash === undefined ? '1' : "EXISTS (SELECT 1 FROM users WHERE id = ? AND password_hash = ? AND status = 'active')";
+    const { changes } = await db.run(
+      `INSERT INTO sessions (id_hash, user_id, mfa_ok, ip, user_agent, created_at, last_seen_at, expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${guard}`,
+      [sha256(token), userId, mfaOk ? 1 : 0, req.ip, String(req.headers['user-agent'] || '').slice(0, 200), at, at, isoIn(config.sessionTtlHours * 3600_000), ...(passwordHash === undefined ? [] : [userId, passwordHash])]
     );
+    if (!changes) return false;
     res.cookie(cookieName(req.secure), token, { secure: req.secure, maxAgeSeconds: config.sessionTtlHours * 3600, sameSite: 'Lax' });
+    return true;
   }
 
   function readToken(req) {

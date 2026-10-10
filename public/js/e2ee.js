@@ -41,13 +41,14 @@ export const e2eeSupported = () => typeof window.RTCRtpScriptTransform === 'func
 export function createE2ee({ signal, onChange, worker = new Worker('/js/e2ee-worker.js', { type: 'module', name: 'e2ee' }) }) {
   const attached = new WeakSet();
   // id → { pub, tag, wrapKey, hasKey (theirs, current), acked: Set of our
-  // key indexes they confirmed, retry, tries }
+  // key indexes they confirmed, since: our key generation when they
+  // joined (they only ever get keys made after it), retry, tries }
   const peers = new Map();
   const early = new Map(); // id → a message that came before we knew them
   let selfId = null;
   let keys = null; // { privateKey, pubB64 }
   let tag = null;
-  let mine = null; // our newest frame key { index, raw }
+  let mine = null; // our newest frame key { index, raw, gen }
   let active = null; // the one frames are sent with
   let rekeyTimer = null;
   let switchTimer = null;
@@ -57,7 +58,7 @@ export function createE2ee({ signal, onChange, worker = new Worker('/js/e2ee-wor
     const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
     keys = { privateKey: pair.privateKey, pubB64: b64(await crypto.subtle.exportKey('raw', pair.publicKey)) };
     tag = crypto.getRandomValues(new Uint8Array(4));
-    mine = { index: 0, raw: crypto.getRandomValues(new Uint8Array(32)) };
+    mine = { index: 0, raw: crypto.getRandomValues(new Uint8Array(32)), gen: 0 };
     activate(mine);
   })();
 
@@ -83,9 +84,13 @@ export function createE2ee({ signal, onChange, worker = new Worker('/js/e2ee-wor
   }
 
   const aad = (from, to, index, tagStr) => enc.encode(`${from}|${to}|${index}|${tagStr}`);
+  // A key they may have: made after they joined, so a newcomer can never
+  // decrypt what was sent before (the rotation their arrival causes makes
+  // the first one they get).
+  const theirs = (p) => mine.gen > p.since;
   // Still owed to this participant: our public key (no pairing yet) or our
   // newest frame key (not acknowledged).
-  const owed = (p) => !p.wrapKey || !p.acked.has(mine.index);
+  const owed = (p) => !p.wrapKey || (theirs(p) && !p.acked.has(mine.index));
   const hello = () => ({ v: 1, pub: keys.pubB64, tag: tagHex(tag) });
 
   // Our public key, and our newest frame key once we know theirs; sent
@@ -96,7 +101,7 @@ export function createE2ee({ signal, onChange, worker = new Worker('/js/e2ee-wor
     if (!p) return;
     const msg = hello();
     if (want) msg.want = true;
-    if (p.wrapKey && !p.acked.has(mine.index)) {
+    if (p.wrapKey && theirs(p) && !p.acked.has(mine.index)) {
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const index = mine.index;
       const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(selfId, id, index, msg.tag) }, p.wrapKey, mine.raw);
@@ -156,7 +161,7 @@ export function createE2ee({ signal, onChange, worker = new Worker('/js/e2ee-wor
     let changed = false;
     for (const id of ids) {
       if (peers.has(id)) continue;
-      peers.set(id, { pub: null, tag: null, wrapKey: null, hasKey: false, acked: new Set(), retry: null, tries: 0 });
+      peers.set(id, { pub: null, tag: null, wrapKey: null, hasKey: false, acked: new Set(), since: mine?.gen ?? 0, retry: null, tries: 0 });
       changed = true;
       sendTo(id);
       if (early.has(id)) onSignal(id, early.get(id));
@@ -178,7 +183,7 @@ export function createE2ee({ signal, onChange, worker = new Worker('/js/e2ee-wor
 
   async function rekey() {
     await ready;
-    mine = { index: (mine.index + 1) & 255, raw: crypto.getRandomValues(new Uint8Array(32)) };
+    mine = { index: (mine.index + 1) & 255, raw: crypto.getRandomValues(new Uint8Array(32)), gen: mine.gen + 1 };
     for (const [id, p] of peers) {
       p.tries = 0;
       if (p.wrapKey) sendTo(id);
@@ -189,7 +194,8 @@ export function createE2ee({ signal, onChange, worker = new Worker('/js/e2ee-wor
     checkSwitch();
   }
 
-  // The newest key goes into use once everyone present holds it.
+  // The newest key goes into use once everyone present holds it (a
+  // newcomer holds none of the earlier ones).
   function checkSwitch() {
     if (!mine || active === mine) return;
     if ([...peers.values()].every((p) => p.acked.has(mine.index))) {

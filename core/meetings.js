@@ -327,8 +327,12 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
     // Only the batch that really closes the meeting updates the cards.
     const closedNow = 'EXISTS (SELECT 1 FROM meetings WHERE id = ? AND ended_at = ? AND state = ?)';
     const closedArgs = [meeting.id, at, state];
+    // People still being rung into it stop ringing, everywhere.
+    const ringing = (await db.all('SELECT user_id FROM meeting_invitations WHERE meeting_id = ? AND ring_until IS NOT NULL', [meeting.id])).map((r) => r.user_id);
     await db.batch([
       ["UPDATE meetings SET state = ?, ended_at = ? WHERE id = ? AND state IN ('scheduled', 'open', 'live')", [state, at, meeting.id]],
+      ['UPDATE meeting_invitations SET ring_until = NULL WHERE meeting_id = ? AND ring_until IS NOT NULL', [meeting.id]],
+      ...ringing.map((userId) => events.statement({ orgId: meeting.org_id, userId, type: 'call.stop', data: { meeting_id: meeting.id } })),
       ['UPDATE guest_sessions SET revoked_at = ? WHERE meeting_id = ? AND revoked_at IS NULL', [at, meeting.id]],
       ["UPDATE meeting_participants SET state = 'left', left_at = COALESCE(left_at, ?) WHERE meeting_id = ? AND state IN ('lobby', 'admitted')", [at, meeting.id]],
       ...(auditRow ? [auditRow] : []),
@@ -343,7 +347,7 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
         events.messageEvent('message.updated', id, closedNow, closedArgs),
       ]),
     ]);
-    if (cards.length) events.notify();
+    if (cards.length || ringing.length) events.notify();
   }
 
   // Meetings past their end time that nobody closed (maintenance).

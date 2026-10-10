@@ -87,7 +87,8 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     }
     await auth.release(stamp);
     await auth.clearFailures(`acct:${email}`);
-    await auth.createSession(res, req, user.id);
+    // Only with the password still as checked: a reset meanwhile wins.
+    if (!(await auth.createSession(res, req, user.id, { passwordHash: creds.password_hash }))) return fail('auth.invalid');
     if (user.mfa_enabled) return res.redirect(`/login/mfa?next=${encodeURIComponent(next)}`);
     res.redirect(next);
   });
@@ -375,10 +376,20 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
   };
   const setupFor = (req, secret) => (secret ? { secret, uri: totpUri({ secret, account: req.user.email, issuer: req.t('app.name') }) } : null);
 
+  // The password hash it was checked against (for the final write's
+  // guard), or null.
   async function passwordOk(req, password) {
     const creds = await users.credentials(req.user.id);
-    return !!creds?.password_hash && (await auth.verifyPassword(password || '', creds.password_hash));
+    return creds?.password_hash && (await auth.verifyPassword(password || '', creds.password_hash)) ? creds.password_hash : null;
   }
+
+  // Guard for a security write after its checks: the password as checked
+  // and this session still valid (a reset, a password change or "sign out
+  // others" that finished meanwhile wins).
+  const unchanged = (req, hash) => [
+    'password_hash = ? AND EXISTS (SELECT 1 FROM sessions WHERE id_hash = ? AND user_id = ? AND expires_at > ?)',
+    [hash, req.session.id_hash, req.user.id, nowIso()],
+  ];
 
   router.get('/account/mfa', requireUser, async (req, res) => {
     if (req.user.mfa_enabled) return res.redirect('/account#mfa');
@@ -394,15 +405,21 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const secret = pendingSecret(req);
     const stamp = await auth.takeAttempt([[`mfa-enroll:${req.user.id}`, 5]]);
     if (!stamp) return renderAccount(req, res, { error: req.t('auth.tooMany'), status: 429 });
-    if (!(await passwordOk(req, form.get('password')))) return renderAccount(req, res, { error: req.t('account.wrongPassword'), mfaSetup: setupFor(req, secret), status: 400 });
+    const checked = await passwordOk(req, form.get('password'));
+    if (!checked) return renderAccount(req, res, { error: req.t('account.wrongPassword'), mfaSetup: setupFor(req, secret), status: 400 });
     // (A wrong authenticator code is a typo, not a password guess.)
     await auth.release(stamp);
     if (!secret || !verifyTotp(secret, form.get('code'))) {
       return renderAccount(req, res, { error: req.t('auth.badCode'), mfaSetup: setupFor(req, secret), status: 400 });
     }
-    // Conditional write: two concurrent enrollments cannot both win.
-    const [res1] = await db.batch([['UPDATE users SET totp_secret = ?, updated_at = ? WHERE id = ? AND totp_secret IS NULL', [secretBox.encrypt(secret), nowIso(), req.user.id]]]);
-    if (!res1.changes) return renderAccount(req, res, { error: req.t('account.mfaAlreadyOn'), status: 409 });
+    // Conditional write: two concurrent enrollments cannot both win, and
+    // nothing is installed after a reset or revocation.
+    const [cond, condArgs] = unchanged(req, checked);
+    const [res1] = await db.batch([[`UPDATE users SET totp_secret = ?, updated_at = ? WHERE id = ? AND totp_secret IS NULL AND ${cond}`, [secretBox.encrypt(secret), nowIso(), req.user.id, ...condArgs]]]);
+    if (!res1.changes) {
+      if (!(await auth.sessionFromToken(auth.readToken(req), { allowPendingMfa: true }))) return res.redirect('/login');
+      return renderAccount(req, res, { error: req.t((await users.byId(req.user.id))?.mfa_enabled ? 'account.mfaAlreadyOn' : 'account.passwordChangedMeanwhile'), status: 409 });
+    }
     await auth.markMfa(req);
     await auth.destroyUserSessions(req.user.id, req.session.id_hash);
     await audit.log({ actor: req.user, action: 'auth.mfa_enable', resourceType: 'user', resourceId: req.user.id, ip: req.ip });
@@ -414,11 +431,14 @@ export function registerAuthRoutes(router, { auth, users, orgs, mailer, config, 
     const form = await readForm(req);
     const stamp = await auth.takeAttempt([[`mfa-disable:${req.user.id}`, 5]]);
     if (!stamp) return renderAccount(req, res, { error: req.t('auth.tooMany'), status: 429 });
-    if (!(await passwordOk(req, form.get('password'))) || !(await auth.checkTotp(req.user.id, form.get('code')))) {
+    const checked = await passwordOk(req, form.get('password'));
+    if (!checked || !(await auth.checkTotp(req.user.id, form.get('code')))) {
       return renderAccount(req, res, { error: req.t('account.mfaDisableFailed'), status: 400 });
     }
     await auth.release(stamp);
-    await users.setTotpSecret(req.user.id, null);
+    const [cond, condArgs] = unchanged(req, checked);
+    const { changes } = await db.run(`UPDATE users SET totp_secret = NULL, updated_at = ? WHERE id = ? AND ${cond}`, [nowIso(), req.user.id, ...condArgs]);
+    if (!changes) return res.redirect('/login');
     await audit.log({ actor: req.user, action: 'auth.mfa_disable', resourceType: 'user', resourceId: req.user.id, ip: req.ip });
     res.redirect('/account?notice=mfaDisabled');
   });
