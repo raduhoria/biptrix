@@ -455,7 +455,7 @@ function request(type, data) {
 
 function sendJoin() {
   const name = $('#guest-name')?.value.trim() || boot.displayName;
-  send('join', { name, page: PAGE, resume: resume.active, audio: state.mic && !!state.local.audio, video: state.cam && !!state.local.video });
+  send('join', { name, page: PAGE, resume: resume.active, audio: state.mic && !!state.local.audio, video: state.cam && !!state.local.video, screen: !!state.local.screen });
 }
 
 function onServer(type, d) {

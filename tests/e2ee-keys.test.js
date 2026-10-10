@@ -15,9 +15,10 @@ function network() {
   const nodes = new Map();
   const down = new Set(); // ids whose socket is down (nothing in or out)
   function add(id) {
-    const worker = { sent: null, recv: new Map(), postMessage(m) {
+    const worker = { sent: null, history: [], recv: new Map(), postMessage(m) {
       if (m.type === 'send-key') this.sent = { tag: Array.from(m.tag, (b) => b.toString(16).padStart(2, '0')).join(''), index: m.index };
       if (m.type === 'recv-key') this.recv.set(`${m.tag}:${m.index}`, true);
+      if (m.type === 'send-key') this.history.push(this.sent);
     } };
     const node = createE2ee({
       worker,
@@ -69,6 +70,23 @@ describe('call key exchange', () => {
     net.down.delete('a');
     a.e2ee.resync();
     assert.ok(await until(() => net.holds('a', 'b') && net.holds('b', 'a') && a.e2ee.status() === 'ok' && b.e2ee.status() === 'ok'));
+  });
+
+  test('a newcomer never gets a key that was used before they joined', async () => {
+    const net = network();
+    const a = net.add('a');
+    const b = net.add('b');
+    a.e2ee.setPeers(['b']);
+    b.e2ee.setPeers(['a']);
+    assert.ok(await until(() => a.e2ee.status() === 'ok' && b.e2ee.status() === 'ok'));
+    const before = { a: a.worker.sent, b: b.worker.sent };
+    const c = net.add('c');
+    a.e2ee.setPeers(['b', 'c']);
+    b.e2ee.setPeers(['a', 'c']);
+    c.e2ee.setPeers(['a', 'b']);
+    assert.ok(await until(() => a.e2ee.status() === 'ok' && b.e2ee.status() === 'ok' && c.e2ee.status() === 'ok' && net.holds('a', 'c') && net.holds('b', 'c') && net.holds('c', 'a')));
+    for (const [who, key] of Object.entries(before)) assert.equal(c.worker.recv.has(`${key.tag}:${key.index}`), false, `C never got ${who}'s pre-join key`);
+    assert.notDeepEqual(a.worker.sent, before.a, 'A rotated');
   });
 
   test('a lost key message is sent again without any reconnect', async () => {

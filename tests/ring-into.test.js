@@ -78,6 +78,68 @@ describe('ringing colleagues into a meeting', () => {
     for (const ws of [ana.ws, coraChat]) ws.close();
   });
 
+  test('the original host rung back in stops ringing once they answer', async () => {
+    const own = (await clients.bob.post(`${API()}/meetings`, { json: { title: 'Bob hosts', notify_members: false, user_ids: [people.cora.id] } })).data.meeting;
+    const coraWs = socket(app.base, `/ws/meeting?id=${own.id}`, clients.cora);
+    await coraWs.opened;
+    coraWs.send('join', { name: 'cora' });
+    await coraWs.next('joined');
+    const bobChat = await chatSocket('bob');
+    assert.deepEqual((await clients.cora.post(`${API()}/meetings/${own.id}/ring-members`, { json: { user_ids: [people.bob.id] } })).data.ringing, [people.bob.id]);
+    await bobChat.next('call.ring', 3000, (m) => m.data.meeting_id === own.id);
+    await clients.bob.post(`${API()}/meetings/${own.id}/ring`, { json: { answer: 'decline' } });
+    await bobChat.next('call.stop', 3000, (m) => m.data.meeting_id === own.id);
+    assert.equal((await app.db.get('SELECT ring_until FROM meeting_invitations WHERE meeting_id = ? AND user_id = ?', [own.id, people.bob.id])).ring_until, null);
+    for (const ws of [coraWs, bobChat]) ws.close();
+  });
+
+  test('ending the meeting stops everyone still ringing', async () => {
+    const m = (await clients.ana.post(`${API()}/meetings`, { json: { title: 'Ends', notify_members: false } })).data.meeting;
+    const anaWs = socket(app.base, `/ws/meeting?id=${m.id}`, clients.ana);
+    await anaWs.opened;
+    anaWs.send('join', { name: 'ana' });
+    await anaWs.next('joined');
+    const danChat = await chatSocket('dan');
+    await clients.ana.post(`${API()}/meetings/${m.id}/ring-members`, { json: { user_ids: [people.dan.id] } });
+    await danChat.next('call.ring', 3000, (x) => x.data.meeting_id === m.id);
+    await clients.ana.post(`${API()}/meetings/${m.id}/end`, { json: {} });
+    await danChat.next('call.stop', 3000, (x) => x.data.meeting_id === m.id);
+    assert.equal((await app.db.get('SELECT COUNT(*) AS n FROM meeting_invitations WHERE meeting_id = ? AND ring_until IS NOT NULL', [m.id])).n, 0);
+    for (const ws of [anaWs, danChat]) ws.close();
+  });
+
+  test('the ring lives in the database: a deadline missed here (another node, a restart) is swept', async () => {
+    const m = (await clients.ana.post(`${API()}/meetings`, { json: { title: 'Swept', notify_members: false } })).data.meeting;
+    const anaWs = socket(app.base, `/ws/meeting?id=${m.id}`, clients.ana);
+    await anaWs.opened;
+    anaWs.send('join', { name: 'ana' });
+    await anaWs.next('joined');
+    const coraChat = await chatSocket('cora');
+    await clients.ana.post(`${API()}/meetings/${m.id}/ring-members`, { json: { user_ids: [people.cora.id] } });
+    await coraChat.next('call.ring', 3000, (x) => x.data.meeting_id === m.id);
+    assert.ok((await app.db.get('SELECT ring_until FROM meeting_invitations WHERE meeting_id = ? AND user_id = ?', [m.id, people.cora.id])).ring_until);
+    // As if the node that rang were gone: the deadline passed unseen.
+    await app.db.run('UPDATE meeting_invitations SET ring_until = ? WHERE meeting_id = ? AND user_id = ?', [new Date(Date.now() - 60_000).toISOString(), m.id, people.cora.id]);
+    await app.services.calls.sweep();
+    await coraChat.next('call.stop', 3000, (x) => x.data.meeting_id === m.id);
+    assert.equal((await app.db.get('SELECT ring_until FROM meeting_invitations WHERE meeting_id = ? AND user_id = ?', [m.id, people.cora.id])).ring_until, null);
+    for (const ws of [anaWs, coraChat]) ws.close();
+  });
+
+  test('rejoining while sharing the screen keeps it shown for the others', async () => {
+    const m = (await clients.ana.post(`${API()}/meetings`, { json: { title: 'Screen', notify_members: false, user_ids: [people.bob.id] } })).data.meeting;
+    const anaWs = socket(app.base, `/ws/meeting?id=${m.id}`, clients.ana);
+    await anaWs.opened;
+    anaWs.send('join', { name: 'ana' });
+    await anaWs.next('joined');
+    const bobWs = socket(app.base, `/ws/meeting?id=${m.id}`, clients.bob);
+    await bobWs.opened;
+    bobWs.send('join', { name: 'bob', resume: true, audio: true, video: true, screen: true });
+    const seen = await anaWs.next('peer.joined');
+    assert.equal(seen.data.media.screen, true);
+    for (const ws of [anaWs, bobWs]) ws.close();
+  });
+
   test('someone not rung cannot use the answer endpoint of a meeting', async () => {
     const other = (await clients.ana.post(`${API()}/meetings`, { json: { title: 'Private', notify_members: false } })).data.meeting;
     assert.equal((await clients.dan.post(`${API()}/meetings/${other.id}/ring`, { json: { answer: 'decline' } })).status, 404);
