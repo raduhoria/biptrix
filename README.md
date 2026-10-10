@@ -226,5 +226,12 @@ Cloudflare (proxied CNAME talk -> balancer.altbetexchange.com)
   - internal DNS `talk.altbetexchange.com A 10.50.1.72` on dns1/dns2 (serial 142);
   - `ai-wizz` received the standard root keys through the Salt state
     `os-common.horia_root_ssh_access`.
+- **Live call test:** `scripts/demo-call.mjs --call <your e-mail>` puts N
+  automated participants (default 6; headless Chrome, fake camera and
+  microphone) in a meeting on production, then rings you in last — as the
+  7th the call moves to the SFU. Every 15 s it prints each bot's path,
+  encryption state, verification code and decoded video frames; at the end
+  (or Ctrl+C) it deletes the bot accounts and their meeting. Needs SSH to
+  the host and playwright-core (`PLAYWRIGHT_CORE`, `CHROME_PATH`).
 - **First run:** open `https://talk.altbetexchange.com/setup?token=<SETUP_TOKEN>`
   (the token is in `PROD_ENV`). Then remove `SETUP_TOKEN` from `PROD_ENV`.
