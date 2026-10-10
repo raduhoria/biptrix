@@ -652,6 +652,7 @@ function showPanel(tab, toggle = true) {
     listDevices().catch(() => {});
     if (!meter) runMeter();
   }
+  if (!panel.hidden && tab === 'people') loadRingDirectory();
   if (!panel.hidden && tab === 'chat') {
     state.chat.unread = 0;
     renderChatBadge();
@@ -1400,6 +1401,62 @@ function renderPeople() {
   </li>`;
   const list = [state.self ? row(state.self.id, state.self, true) : '', ...[...state.peers.values()].map((p) => row(p.info.id, p.info))];
   $('#people-list').innerHTML = list.join('');
+  renderRing();
+}
+
+// ------------------------------------------------------------ ring into
+// People → "Ring a colleague": anyone in the meeting (not guests or
+// external collaborators) rings colleagues in; they get the incoming-call
+// screen and push, and join without the lobby. Colleagues already in the
+// call are not listed; one just rung shows "Ringing…" for the ring time.
+const RING_MS = 45_000;
+const ring = { people: null, presence: {}, sent: new Map(), loading: null };
+
+function loadRingDirectory() {
+  if (!$('#ring-box') || ring.people || ring.loading) return;
+  ring.loading = api(`/api/o/${boot.org.slug}/bootstrap`)
+    .then((data) => {
+      ring.people = data.directory.filter((u) => u.role !== 'external');
+      ring.presence = data.presence || {};
+      renderRing();
+    })
+    .catch(() => {})
+    .finally(() => (ring.loading = null));
+}
+
+function renderRing() {
+  const box = $('#ring-list');
+  if (!box || !ring.people) return;
+  const inCall = new Set([boot.userId, ...[...state.peers.values()].map((p) => p.info.user_id)]);
+  const q = $('#ring-search').value.trim().toLowerCase();
+  const rank = (u) => (ring.presence[u.id] && ring.presence[u.id] !== 'offline' ? 0 : 1);
+  const list = ring.people
+    .filter((u) => !inCall.has(u.id) && (!q || `${u.name} ${u.email} ${u.title || ''}`.toLowerCase().includes(q)))
+    .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+    .slice(0, 8);
+  box.innerHTML =
+    list
+      .map((u) => {
+        const sent = Date.now() - (ring.sent.get(u.id) || 0) < RING_MS;
+        return `<li class="d-flex align-items-center gap-2 py-1">
+      <span class="avatar avatar-sm" style="--h:${hue(u.id)}">${esc(initials(u.name))}<span class="presence-dot ${esc(ring.presence[u.id] || 'offline')}"></span></span>
+      <span class="flex-grow-1 min-w-0 text-truncate">${esc(u.name)}${u.title ? `<span class="d-block small opacity-75 text-truncate">${esc(u.title)}</span>` : ''}</span>
+      <button class="btn btn-sm ${sent ? 'btn-outline-light' : 'btn-success'}" data-action="ring-member" data-uid="${esc(u.id)}"${sent ? ' disabled' : ''}>${icon('phone')} ${esc(t(sent ? 'meet.ringing' : 'meet.ringBtn'))}</button>
+    </li>`;
+      })
+      .join('') || `<li class="small opacity-75">${esc(t('meet.ringNone'))}</li>`;
+}
+
+async function ringMember(uid) {
+  ring.sent.set(uid, Date.now());
+  renderRing();
+  setTimeout(renderRing, RING_MS + 100);
+  try {
+    await api(`/api/o/${boot.org.slug}/meetings/${boot.meeting.id}/ring-members`, { method: 'POST', body: { user_ids: [uid] } });
+  } catch {
+    ring.sent.delete(uid);
+    renderRing();
+  }
 }
 
 function onLobby(waiting) {
@@ -1551,6 +1608,8 @@ root.addEventListener('click', async (e) => {
       btn.classList.add('active');
       setTimeout(() => btn.classList.remove('active'), 1200);
       return;
+    case 'ring-member':
+      return ringMember(btn.dataset.uid);
     case 'leave':
       return leave();
     case 'end':
@@ -1576,6 +1635,8 @@ root.addEventListener('click', async (e) => {
     default:
   }
 });
+
+$('#ring-search')?.addEventListener('input', renderRing);
 
 $('#invite-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();

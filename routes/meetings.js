@@ -100,11 +100,30 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
   // happens by simply joining the room.)
   router.post('/api/o/:org/meetings/:id/ring', ...member, async (req, res) => {
     const meeting = await meetings.requireMeeting(req.org, req.params.id);
-    if (!meeting.conversation_id) throw appError('not_found', 'Not a call');
-    await chat.requireConversation(req.org, req.user, meeting.conversation_id);
+    // A callee of a call (member of its conversation), or someone rung into
+    // a meeting (invited).
+    if ((await meetings.memberAccess(meeting, req.user)) === 'lobby') throw appError('not_found', 'Not a call');
     const answer = (await readJson(req)).answer === 'accept' ? 'accept' : 'decline';
     await calls.respond(meeting, req.user, answer);
     res.json({ ok: true });
+  });
+
+  // Ring colleagues into a meeting under way: anyone in it (not external
+  // collaborators), or whoever may manage it. They get direct access (no
+  // lobby) and the incoming-call screen and push, like a call.
+  router.post('/api/o/:org/meetings/:id/ring-members', ...member, async (req, res) => {
+    const meeting = await meetings.requireMeeting(req.org, req.params.id);
+    if (!meetings.isOpen(meeting)) throw appError('expired', 'Meeting ended');
+    if (req.membership.role === 'external') throw appError('forbidden', 'External collaborators cannot ring others in');
+    const inside = await db.get("SELECT 1 AS x FROM meeting_participants WHERE meeting_id = ? AND user_id = ? AND state = 'admitted'", [meeting.id, req.user.id]);
+    if (!inside && !(await meetings.canManage(meeting, req.user, req.membership.role))) throw appError('forbidden', 'Only people in the meeting can ring others in');
+    const body = await readJson(req);
+    const wanted = (Array.isArray(body.user_ids) ? body.user_ids : []).map(String).filter((id) => id !== req.user.id).slice(0, 10);
+    // Colleagues only: external collaborators are not rung into meetings.
+    const ids = wanted.length ? (await db.all(`SELECT user_id FROM memberships WHERE org_id = ? AND role != 'external' AND user_id IN (${wanted.map(() => '?').join(',')})`, [req.org.id, ...wanted])).map((r) => r.user_id) : [];
+    const allowed = await meetings.allowMembers(req.org, meeting, req.user, ids, req.ip);
+    const kind = meeting.call_kind || (body.kind === 'audio' ? 'audio' : 'video');
+    res.json({ ringing: await calls.ringInto(req.org, req.user, meeting, allowed, kind) });
   });
 
   async function managed(req) {
@@ -157,7 +176,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     if (!meetings.isOpen(meeting)) return res.status(410).send(messagePage({ t: req.t, title: meeting.title, message: req.t('errors.meetingEnded'), back }));
     // ?call=audio|video: straight in from a call (no pre-join screen), camera per call kind.
     const call = ['audio', 'video'].includes(req.query.call) ? req.query.call : '';
-    res.send(meetingRoomView({ t: req.t, meeting, org: req.org, mode: 'member', displayName: req.user.name, canInvite: req.membership.role !== 'external' && (await meetings.canManage(meeting, req.user, req.membership.role)), backHref: back, call, userId: req.user.id }));
+    res.send(meetingRoomView({ t: req.t, meeting, org: req.org, mode: 'member', displayName: req.user.name, canInvite: req.membership.role !== 'external' && (await meetings.canManage(meeting, req.user, req.membership.role)), backHref: back, call, userId: req.user.id, canRing: req.membership.role !== 'external' }));
   });
 
   // ---------------------------------------------------------- guest flow

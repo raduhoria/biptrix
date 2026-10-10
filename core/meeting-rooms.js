@@ -97,7 +97,7 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
 
   // `page`: one id per loaded meeting page, so a peer can tell a resumed
   // connection (keep the media path) from a reloaded page (rebuild it).
-  const peerInfo = (ws) => ({ id: ws.participant.id, page: ws.page || '', name: ws.participant.display_name, role: ws.participant.role, guest: !ws.participant.user_id, media: ws.media, tracks: ws.sfu?.published || {} });
+  const peerInfo = (ws) => ({ id: ws.participant.id, page: ws.page || '', name: ws.participant.display_name, role: ws.participant.role, guest: !ws.participant.user_id, user_id: ws.participant.user_id || null, media: ws.media, tracks: ws.sfu?.published || {} });
   // One Cloudflare session per participant connection, created on first use.
   async function sfuOf(ws) {
     ws.sfu ||= { sessionId: await media.sfu.newSession(), pending: {}, published: {}, screens: 0 };
