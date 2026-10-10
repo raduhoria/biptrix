@@ -157,7 +157,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     if (!meetings.isOpen(meeting)) return res.status(410).send(messagePage({ t: req.t, title: meeting.title, message: req.t('errors.meetingEnded'), back }));
     // ?call=audio|video: straight in from a call (no pre-join screen), camera per call kind.
     const call = ['audio', 'video'].includes(req.query.call) ? req.query.call : '';
-    res.send(meetingRoomView({ t: req.t, meeting, org: req.org, mode: 'member', displayName: req.user.name, canInvite: req.membership.role !== 'external' && (await meetings.canManage(meeting, req.user, req.membership.role)), backHref: back, call, userId: req.user.id, meshMax: config.media.meshMax }));
+    res.send(meetingRoomView({ t: req.t, meeting, org: req.org, mode: 'member', displayName: req.user.name, canInvite: req.membership.role !== 'external' && (await meetings.canManage(meeting, req.user, req.membership.role)), backHref: back, call, userId: req.user.id }));
   });
 
   // ---------------------------------------------------------- guest flow
@@ -230,7 +230,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     if (!guest || guest.meeting.id !== req.params.id) {
       return res.status(403).send(messagePage({ t: req.t, title: req.t('guest.title'), message: req.t('guest.invalid.notVerified'), back: '/' }));
     }
-    res.send(meetingRoomView({ t: req.t, meeting: guest.meeting, org: guest.org, mode: 'guest', displayName: guest.inv.name || '', backHref: `/meet/${guest.meeting.id}/left`, meshMax: config.media.meshMax }));
+    res.send(meetingRoomView({ t: req.t, meeting: guest.meeting, org: guest.org, mode: 'guest', displayName: guest.inv.name || '', backHref: `/meet/${guest.meeting.id}/left` }));
   });
 
   router.get('/meet/:id/left', (req, res) => res.send(messagePage({ t: req.t, title: req.t('guest.leftTitle'), message: req.t('guest.leftText'), back: `/meet/${req.params.id}` })));
