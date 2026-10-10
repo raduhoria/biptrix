@@ -588,11 +588,18 @@ function ringTone() {
   }
 }
 
-// The meeting window is opened right away (still inside the click, so it
-// is not blocked as a pop-up) and pointed at the room once the server
-// answered. It starts on a page of the app, not about:blank: the installed
-// app opens its own pages in an app window, anything else in the browser.
+// In the browser the call gets its own tab, opened right away (still
+// inside the click, so it is not blocked as a pop-up) and pointed at the
+// room once the server answered. In the installed app the call takes over
+// the app's window, like a phone call (a new window would open in the
+// browser on desktop); leaving the call comes back to the conversation.
+const IN_APP = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 function openCallTab(url = `/o/${ORG.slug}/calling`) {
+  if (IN_APP) {
+    if (url !== `/o/${ORG.slug}/calling`) location.href = url;
+    // Same interface as a window: pointed at the room once it exists.
+    return { set location(to) { location.href = to; }, close() {} };
+  }
   const w = window.open(url, '_blank');
   if (w) w.opener = null;
   return w;
@@ -601,10 +608,10 @@ function openCallTab(url = `/o/${ORG.slug}/calling`) {
 async function answerCall(answer) {
   const d = ringing.call;
   if (!d) return;
-  // The room's address is known: opened directly.
-  if (answer === 'accept') openCallTab(`/o/${ORG.slug}/meet/${d.meeting_id}?call=${d.kind}`);
   stopRinging();
   api(`${API}/meetings/${d.meeting_id}/ring`, { method: 'POST', body: { answer } }).catch(() => {});
+  // The room's address is known: opened directly (joining also answers).
+  if (answer === 'accept') openCallTab(`/o/${ORG.slug}/meet/${d.meeting_id}?call=${d.kind}`);
 }
 
 document.addEventListener('click', (e) => {
