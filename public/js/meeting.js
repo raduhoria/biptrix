@@ -396,6 +396,12 @@ function keepable(peer, info) {
 // give peers that are not back yet a moment before dropping them.
 function onResumed(d) {
   endResume();
+  // The server no longer knows our SFU session (it restarted, or our place
+  // expired): the old one still plays what it carries, but nothing more is
+  // asked through it, and the next move to the SFU builds a new one.
+  if (state.sfu && !d.sfu_resumed) state.sfu.stale = true;
+  // Key messages may have been lost while the socket was down.
+  e2ee?.resync();
   const listed = new Set(d.peers.map((p) => p.id));
   for (const info of d.peers) {
     const peer = state.peers.get(info.id);
@@ -764,7 +770,8 @@ async function sfuStart() {
       sfuSync();
     }
     // A broken SFU connection: rejoin from scratch (the server re-admits).
-    if (pc.connectionState === 'failed') state.ws?.close(4000, 'rejoin');
+    // (A stale one, or one already replaced, just goes.)
+    if (pc.connectionState === 'failed' && state.sfu === sfu && !sfu.stale) state.ws?.close(4000, 'rejoin');
   };
   await sfuEnqueue(async () => {
     sfu.senders.audio = pc.addTransceiver(sfuTrackFor('audio'), { direction: 'sendonly' });
@@ -782,7 +789,7 @@ async function sfuStart() {
 // participant who left). Failed pulls are retried shortly.
 function sfuSync() {
   const sfu = state.sfu;
-  if (!sfu?.connected) return;
+  if (!sfu?.connected || sfu.stale) return;
   return sfuEnqueue(async () => {
     const live = new Map();
     for (const peer of state.peers.values()) for (const [slot, trackName] of Object.entries(peer.info.tracks || {})) live.set(trackName, { pid: peer.info.id, slot });
@@ -821,7 +828,7 @@ function sfuSync() {
 
 function sfuScreenOn() {
   const sfu = state.sfu;
-  if (!sfu?.connected || !state.local.screen) return;
+  if (!sfu?.connected || sfu.stale || !state.local.screen) return;
   return sfuEnqueue(async () => {
     sfu.screen = sfu.pc.addTransceiver(state.local.screen, { direction: 'sendonly' });
     secure(sfu.screen, 'video');
@@ -835,7 +842,7 @@ function sfuScreenOn() {
 
 function sfuScreenOff() {
   const sfu = state.sfu;
-  if (!sfu?.screen) return;
+  if (!sfu?.screen || sfu.stale) return;
   const tr = sfu.screen;
   sfu.screen = null;
   return sfuEnqueue(async () => {
@@ -1096,12 +1103,20 @@ function sfuDoneCheck() {
   if ([...state.peers.values()].every(direct)) leaveSfu();
 }
 
+// A stale SFU session (see onResumed) goes before a new one is built.
+function dropSfu() {
+  const sfu = state.sfu;
+  state.sfu = null;
+  sfu?.pc.close();
+  for (const peer of state.peers.values()) peer.sfuGot.clear();
+}
+
 function leaveSfu() {
   const sfu = state.sfu;
   if (!sfu) return;
   state.sfu = null;
   clearTimeout(moveTimer);
-  request('sfu.leave', {}).catch(() => {});
+  if (!sfu.stale) request('sfu.leave', {}).catch(() => {});
   sfu.pc.close();
   renderSecurity();
   for (const peer of state.peers.values()) {
@@ -1141,6 +1156,7 @@ function moveTo(topology) {
   clearTimeout(moveTimer);
   if (topology === 'sfu') {
     for (const peer of state.peers.values()) peer.sfuGot.clear();
+    if (state.sfu?.stale) dropSfu();
     if (!state.sfu) sfuStart();
     // Whatever has not moved by then is closed anyway.
     moveTimer = setTimeout(() => {

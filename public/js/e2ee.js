@@ -12,16 +12,23 @@ import { tagHex } from './e2ee-frame.js';
 //   sent to each other participant wrapped with a key derived from their
 //   ECDH secret (HKDF), bound to both ids, the tag and the key index. The
 //   server relays only public keys and wrapped keys.
+// - Every wrapped key is acknowledged; until it is, it is sent again
+//   (backing off), so a message lost with a dropped socket is not lost for
+//   good. After our own reconnect (resync) everyone is asked to send their
+//   key again and gets ours again.
 // - Whenever someone joins or leaves, everyone makes a new frame key and
-//   sends it to those present; it is used after SWITCH_MS, so receivers have
-//   it first (they keep the last few). Someone who left cannot decrypt
-//   what follows; someone who joins, what came before.
+//   sends it to those present; it is used once all of them acknowledged it
+//   (at most SWITCH_MAX_MS later; receivers keep the last few keys). Someone
+//   who left cannot decrypt what follows; someone who joins, what came
+//   before.
 // - The verification code is a hash of every participant's public key:
 //   if everyone sees the same code, nobody (not even our server or the
 //   proxy in front of it) swapped keys on the way.
 
-const SWITCH_MS = 1500;
+const SWITCH_MAX_MS = 5000;
 const REKEY_DEBOUNCE_MS = 300;
+const RETRY_MS = 1000; // doubled per attempt, up to RETRY_MAX_MS
+const RETRY_MAX_MS = 10_000;
 const enc = new TextEncoder();
 const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
@@ -31,15 +38,17 @@ const EMOJI = [...'🐶🐱🦊🐻🐼🐨🐯🦁🐮🐷🐸🐵🐔🐧🦆�
 
 export const e2eeSupported = () => typeof window.RTCRtpScriptTransform === 'function' && !!window.crypto?.subtle;
 
-export function createE2ee({ signal, onChange }) {
-  const worker = new Worker('/js/e2ee-worker.js', { type: 'module', name: 'e2ee' });
+export function createE2ee({ signal, onChange, worker = new Worker('/js/e2ee-worker.js', { type: 'module', name: 'e2ee' }) }) {
   const attached = new WeakSet();
-  const peers = new Map(); // id → { pub, tag, wrapKey, sentIndex, hasKey }
+  // id → { pub, tag, wrapKey, hasKey (theirs, current), acked: Set of our
+  // key indexes they confirmed, retry, tries }
+  const peers = new Map();
   const early = new Map(); // id → a message that came before we knew them
   let selfId = null;
   let keys = null; // { privateKey, pubB64 }
   let tag = null;
-  let mine = { index: 0, raw: null };
+  let mine = null; // our newest frame key { index, raw }
+  let active = null; // the one frames are sent with
   let rekeyTimer = null;
   let switchTimer = null;
   let code = '';
@@ -49,8 +58,14 @@ export function createE2ee({ signal, onChange }) {
     keys = { privateKey: pair.privateKey, pubB64: b64(await crypto.subtle.exportKey('raw', pair.publicKey)) };
     tag = crypto.getRandomValues(new Uint8Array(4));
     mine = { index: 0, raw: crypto.getRandomValues(new Uint8Array(32)) };
-    worker.postMessage({ type: 'send-key', tag, index: mine.index, raw: mine.raw });
+    activate(mine);
   })();
+
+  function activate(key) {
+    active = key;
+    worker.postMessage({ type: 'send-key', tag, index: key.index, raw: key.raw });
+    onChange();
+  }
 
   // Encrypt what this sender sends / decrypt what this receiver gets.
   function attach(senderOrReceiver, kind, side) {
@@ -68,20 +83,31 @@ export function createE2ee({ signal, onChange }) {
   }
 
   const aad = (from, to, index, tagStr) => enc.encode(`${from}|${to}|${index}|${tagStr}`);
+  // Still owed to this participant: our public key (no pairing yet) or our
+  // newest frame key (not acknowledged).
+  const owed = (p) => !p.wrapKey || !p.acked.has(mine.index);
+  const hello = () => ({ v: 1, pub: keys.pubB64, tag: tagHex(tag) });
 
-  // Our public key, and our current frame key once we know theirs.
-  async function sendTo(id) {
+  // Our public key, and our newest frame key once we know theirs; sent
+  // again until acknowledged. `want`: asks them to send theirs again.
+  async function sendTo(id, { want = false } = {}) {
     await ready;
     const p = peers.get(id);
-    const msg = { v: 1, pub: keys.pubB64, tag: tagHex(tag) };
-    if (p?.wrapKey && p.sentIndex !== mine.index) {
+    if (!p) return;
+    const msg = hello();
+    if (want) msg.want = true;
+    if (p.wrapKey && !p.acked.has(mine.index)) {
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const index = mine.index;
       const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad(selfId, id, index, msg.tag) }, p.wrapKey, mine.raw);
       Object.assign(msg, { index, iv: b64(iv), key: b64(ct) });
-      p.sentIndex = index;
     }
     signal(id, { e2ee: msg });
+    clearTimeout(p.retry);
+    p.retry = setTimeout(() => {
+      p.retry = null;
+      if (peers.get(id) === p && owed(p)) sendTo(id);
+    }, Math.min(RETRY_MAX_MS, RETRY_MS * 2 ** p.tries++));
   }
 
   async function onSignal(from, m) {
@@ -91,7 +117,7 @@ export function createE2ee({ signal, onChange }) {
     if (!p) return early.set(from, m); // handled once they are listed
     if (p.pub !== m.pub) {
       // New (or first) public key for this participant: a fresh pairing.
-      Object.assign(p, { pub: m.pub, tag: m.tag, wrapKey: await wrapKeyFor(from, m.pub).catch(() => null), sentIndex: -1, hasKey: false });
+      Object.assign(p, { pub: m.pub, tag: m.tag, wrapKey: await wrapKeyFor(from, m.pub).catch(() => null), hasKey: false, acked: new Set(), tries: 0 });
       if (!p.wrapKey) return;
       await updateCode();
     }
@@ -103,12 +129,25 @@ export function createE2ee({ signal, onChange }) {
         worker.postMessage({ type: 'recv-key', tag: m.tag, index: m.index & 255, raw });
         p.tag = m.tag;
         p.hasKey = true;
+        signal(from, { e2ee: { ...hello(), ack: m.index } });
         onChange();
       } catch {
         // Not for this pairing (an older key pair): ignored.
       }
     }
-    if (p.sentIndex !== mine.index) sendTo(from);
+    if (Number.isInteger(m.ack)) {
+      p.acked.add(m.ack);
+      if (p.acked.size > 8) p.acked.delete(p.acked.values().next().value);
+      if (m.ack === mine.index) p.tries = 0;
+      checkSwitch();
+      onChange();
+    }
+    // They lost our key (their reconnect): send it again.
+    if (m.want) {
+      p.acked.delete(mine.index);
+      p.tries = 0;
+    }
+    if (owed(p) && (m.want || !p.retry)) sendTo(from);
   }
 
   // Who is in the call now (self excluded). Newcomers get our public key;
@@ -117,7 +156,7 @@ export function createE2ee({ signal, onChange }) {
     let changed = false;
     for (const id of ids) {
       if (peers.has(id)) continue;
-      peers.set(id, { pub: null, tag: null, wrapKey: null, sentIndex: -1, hasKey: false });
+      peers.set(id, { pub: null, tag: null, wrapKey: null, hasKey: false, acked: new Set(), retry: null, tries: 0 });
       changed = true;
       sendTo(id);
       if (early.has(id)) onSignal(id, early.get(id));
@@ -125,6 +164,7 @@ export function createE2ee({ signal, onChange }) {
     }
     for (const [id, p] of peers) {
       if (ids.includes(id)) continue;
+      clearTimeout(p.retry);
       peers.delete(id);
       if (p.tag) worker.postMessage({ type: 'forget', tag: p.tag });
       changed = true;
@@ -139,10 +179,34 @@ export function createE2ee({ signal, onChange }) {
   async function rekey() {
     await ready;
     mine = { index: (mine.index + 1) & 255, raw: crypto.getRandomValues(new Uint8Array(32)) };
-    const next = mine;
-    for (const [id, p] of peers) if (p.wrapKey) sendTo(id);
+    for (const [id, p] of peers) {
+      p.tries = 0;
+      if (p.wrapKey) sendTo(id);
+    }
     clearTimeout(switchTimer);
-    switchTimer = setTimeout(() => mine === next && worker.postMessage({ type: 'send-key', tag, index: next.index, raw: next.raw }), SWITCH_MS);
+    const next = mine;
+    switchTimer = setTimeout(() => mine === next && active !== next && activate(next), SWITCH_MAX_MS);
+    checkSwitch();
+  }
+
+  // The newest key goes into use once everyone present holds it.
+  function checkSwitch() {
+    if (!mine || active === mine) return;
+    if ([...peers.values()].every((p) => p.acked.has(mine.index))) {
+      clearTimeout(switchTimer);
+      activate(mine);
+    }
+  }
+
+  // After our own socket came back: messages may have been lost both ways.
+  async function resync() {
+    await ready;
+    for (const [id, p] of peers) {
+      p.acked.clear();
+      p.tries = 0;
+      sendTo(id, { want: true });
+    }
+    onChange();
   }
 
   // The code everyone compares: every participant's public key, in order.
@@ -164,12 +228,14 @@ export function createE2ee({ signal, onChange }) {
     attach,
     onSignal,
     setPeers,
+    resync,
     start(id) {
       selfId = id;
       updateCode();
     },
-    // ok: keys exchanged with everyone present; pending: still exchanging.
-    status: () => ([...peers.values()].every((p) => p.hasKey && p.wrapKey) ? 'ok' : 'pending'),
+    // ok: every participant holds the key we send with and we hold theirs;
+    // pending: still exchanging (or re-exchanging after a reconnect).
+    status: () => ([...peers.values()].every((p) => p.wrapKey && p.hasKey && active && p.acked.has(active.index)) ? 'ok' : 'pending'),
     code: () => code,
   };
 }
