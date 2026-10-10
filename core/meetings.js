@@ -110,7 +110,13 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
   async function inviteMembers(org, meeting, user, role, userIds, ip) {
     if (!(await canManage(meeting, user, role))) throw appError('forbidden', 'Only the host can invite');
     if (role === 'external') throw appError('forbidden', 'External collaborators cannot invite');
-    const ids = [...new Set(userIds)].slice(0, 200);
+    return allowMembers(org, meeting, user, userIds, ip);
+  }
+
+  // Members of the organization get direct access to the meeting (no
+  // lobby). Returns those who are active members.
+  async function allowMembers(org, meeting, user, userIds, ip) {
+    const ids = [...new Set(userIds.map(String))].slice(0, 200);
     const valid = ids.length
       ? await db.all(`SELECT user_id FROM memberships WHERE org_id = ? AND status = 'active' AND user_id IN (${ids.map(() => '?').join(',')})`, [org.id, ...ids])
       : [];
@@ -417,6 +423,8 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
     create,
     inviteGuest,
     inviteMembers,
+    allowMembers,
+    memberAccess,
     canManage,
     joinAsMember,
     invitationByToken,

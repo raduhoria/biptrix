@@ -538,6 +538,7 @@ function onRing(d) {
     <span class="avatar" style="--h:${hue(d.from)}">${esc(initials(name))}</span>
     <div class="fs-5 fw-semibold text-truncate">${esc(name)}</div>
     <div class="small opacity-75">${esc(t(d.kind === 'audio' ? 'incomingAudio' : 'incomingVideo'))}</div>
+    ${d.title ? `<div class="small opacity-75 text-truncate">${esc(d.title)}</div>` : ''}
     <div class="incoming-actions">
       <div><button class="btn btn-danger" data-ring="decline" aria-label="${esc(t('callDecline'))}">${icon('phone-off')}</button><small>${esc(t('callDecline'))}</small></div>
       <div><button class="btn btn-success" data-ring="accept" aria-label="${esc(t('callAccept'))}">${icon(d.kind === 'audio' ? 'phone' : 'video')}</button><small>${esc(t('callAccept'))}</small></div>

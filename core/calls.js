@@ -27,35 +27,40 @@ const MAX_RING = SMALL_SPACE; // larger Spaces get the meeting card, no ringing
 // fallback after a restart.
 export function createCalls({ db, events, chat, meetings, orgs, users, mailer, config, rooms, isOnline, isWatching = () => false, push = null, reRingMs = RE_RING_MS }) {
   const timers = new Map();
-  // meetingId → { users: callees whose devices still ring, timer }
+  // key → { meetingId, users: callees whose devices still ring, timer }
+  // (key: the meeting id for its own ring, another for each "ring into").
   const reRings = new Map();
+  // meetingId → Map<userId, ring_until>: people rung into a meeting already
+  // under way ("ring into"), until they join, decline, or it times out.
+  const adhoc = new Map();
+  let adhocSeq = 0;
 
-  function endReRing(meetingId) {
-    clearInterval(reRings.get(meetingId)?.timer);
-    reRings.delete(meetingId);
+  function endReRing(key) {
+    clearInterval(reRings.get(key)?.timer);
+    reRings.delete(key);
   }
 
   // Rings again the devices of those who neither answered nor declined, as
-  // long as the call rings (checked in the database: another node may have
-  // taken the answer) and not in the last moments before the deadline.
-  function startReRing(org, meeting, targets, extra) {
-    endReRing(meeting.id);
+  // long as `active()` says the ring is on (checked in the database for a
+  // call: another node may have taken the answer) and not in the last
+  // moments before the deadline.
+  function startReRing(key, org, meeting, targets, extra, active) {
+    endReRing(key);
     if (!push?.enabled) return;
-    const entry = { users: new Set(targets) };
+    const entry = { meetingId: meeting.id, users: new Set(targets) };
     entry.timer = setInterval(async () => {
       try {
-        const now = await meetings.byId(meeting.id);
-        if (now?.ring_state !== 'ringing' || Date.now() > Date.parse(extra.until) - reRingMs / 2) return endReRing(meeting.id);
+        if (!(await active()) || Date.now() > Date.parse(extra.until) - reRingMs / 2) return endReRing(key);
         const joined = new Set((await db.all('SELECT user_id FROM meeting_participants WHERE meeting_id = ? AND user_id IS NOT NULL', [meeting.id])).map((r) => r.user_id));
         const users = [...entry.users].filter((id) => !joined.has(id));
-        if (!users.length) return endReRing(meeting.id);
+        if (!users.length) return endReRing(key);
         await pushCall(org, meeting, users, 'ring', extra);
       } catch (err) {
         console.error('Call re-ring failed:', err.message);
       }
     }, reRingMs);
     entry.timer.unref?.();
-    reRings.set(meeting.id, entry);
+    reRings.set(key, entry);
   }
 
   // Push to the callees' devices (the app may be closed): the ring, with
@@ -69,7 +74,7 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
       const u = await users.byId(userId);
       if (!u) continue;
       const t = createTranslator(u.locale || 'en');
-      const base = { tag: `call-${meeting.id}`, meeting_id: meeting.id, url: `${config.appUrl}/o/${org.slug}/c/${meeting.conversation_id}` };
+      const base = { tag: `call-${meeting.id}`, meeting_id: meeting.id, url: `${config.appUrl}/o/${org.slug}/${meeting.conversation_id ? `c/${meeting.conversation_id}` : `meet/${meeting.id}`}` };
       const payload =
         kind === 'ring'
           ? {
@@ -104,7 +109,7 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
     ]);
     events.notify();
     pushCall(org, meeting, targets, 'ring', { caller, callKind: kind, until }).catch(() => {});
-    startReRing(org, meeting, targets, { caller, callKind: kind, until });
+    startReRing(meeting.id, org, meeting, targets, { caller, callKind: kind, until }, async () => (await meetings.byId(meeting.id))?.ring_state === 'ringing');
     clearTimeout(timers.get(meeting.id));
     const timer = setTimeout(() => deadline(meeting.id).catch((err) => console.error('Call deadline failed:', err.message)), RING_MS + 500);
     timer.unref?.();
@@ -114,10 +119,10 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
 
   async function stopFor(orgId, meetingId, userIds, { pushed = true } = {}) {
     if (!userIds.length) return;
-    const reRing = reRings.get(meetingId);
-    if (reRing) {
+    for (const [key, reRing] of reRings) {
+      if (reRing.meetingId !== meetingId) continue;
       for (const id of userIds) reRing.users.delete(id);
-      if (!reRing.users.size) endReRing(meetingId);
+      if (!reRing.users.size) endReRing(key);
     }
     await db.batch(userIds.map((userId) => events.statement({ orgId, userId, type: 'call.stop', data: { meeting_id: meetingId } })));
     events.notify();
@@ -128,9 +133,50 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
     }
   }
 
+  // Someone in a meeting rings colleagues into it ("ring into"): the same
+  // incoming-call screen and push as a call, for RING_MS; whoever has not
+  // joined or declined by then gets a missed call. Those already in the
+  // room are not rung.
+  async function ringInto(org, caller, meeting, userIds, kind) {
+    const present = new Set((await db.all("SELECT user_id FROM meeting_participants WHERE meeting_id = ? AND user_id IS NOT NULL AND state = 'admitted' AND left_at IS NULL", [meeting.id])).map((r) => r.user_id));
+    const targets = userIds.filter((id) => id !== caller.id && !present.has(id));
+    if (!targets.length) return [];
+    const until = new Date(Date.now() + RING_MS).toISOString();
+    const pending = adhoc.get(meeting.id) || new Map();
+    adhoc.set(meeting.id, pending);
+    for (const id of targets) pending.set(id, until);
+    const data = { meeting_id: meeting.id, conversation_id: meeting.conversation_id, from: caller.id, from_name: caller.name, kind, ring_until: until, title: meeting.title };
+    await db.batch(targets.map((userId) => events.statement({ orgId: org.id, userId, type: 'call.ring', data })));
+    events.notify();
+    const extra = { caller, callKind: kind, until };
+    pushCall(org, meeting, targets, 'ring', extra).catch(() => {});
+    startReRing(`${meeting.id}#${++adhocSeq}`, org, meeting, targets, extra, async () => targets.some((id) => adhoc.get(meeting.id)?.get(id) === until));
+    const timer = setTimeout(async () => {
+      try {
+        const left = targets.filter((id) => pending.get(id) === until);
+        for (const id of left) pending.delete(id);
+        if (!pending.size) adhoc.delete(meeting.id);
+        if (!left.length) return;
+        await stopFor(org.id, meeting.id, left, { pushed: false });
+        await pushCall(org, meeting, left, 'missed', { caller });
+      } catch (err) {
+        console.error('Ring-into deadline failed:', err.message);
+      }
+    }, RING_MS + 500);
+    timer.unref?.();
+    return targets;
+  }
+
+  const ringingInto = (meetingId, userId) => !!adhoc.get(meetingId)?.has(userId);
+
   // A callee answered (joined the room) or declined, on any device.
   async function respond(meeting, user, answer) {
-    if (!meeting.call_kind || user.id === meeting.host_id) return;
+    if (user.id === meeting.host_id) return;
+    const rungInto = adhoc.get(meeting.id)?.delete(user.id);
+    if (!meeting.call_kind) {
+      if (rungInto) await stopFor(meeting.org_id, meeting.id, [user.id]);
+      return;
+    }
     await stopFor(meeting.org_id, meeting.id, [user.id]);
     if (answer === 'accept') {
       // A call's duration runs from the answer, not from the first ring.
@@ -187,7 +233,7 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
   rooms.setHooks({
     // Entering the room is answering.
     joined: async (meeting, ws) => {
-      if (meeting.call_kind && ws.ctx.user && ws.ctx.user.id !== meeting.host_id) await respond(meeting, ws.ctx.user, 'accept');
+      if (ws.ctx.user && ws.ctx.user.id !== meeting.host_id && (meeting.call_kind || ringingInto(meeting.id, ws.ctx.user.id))) await respond(meeting, ws.ctx.user, 'accept');
     },
     // The caller hung up while it was still ringing: a missed call.
     // Otherwise a call ends like a phone call when everyone has left (after
@@ -217,6 +263,7 @@ export function createCalls({ db, events, chat, meetings, orgs, users, mailer, c
 
   return {
     ring,
+    ringInto,
     respond,
     sweep,
     close: () => {

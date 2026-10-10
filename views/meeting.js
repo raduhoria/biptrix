@@ -3,7 +3,7 @@ import { alerts, authPage, escapeHtml, icon, jsonData, page } from './layout.js'
 // Meeting room (members at /o/:org/meet/:id, verified guests at /meet/:id).
 // Pre-join (preview, devices, name) → lobby → room; all driven by
 // public/js/meeting.js over /ws/meeting.
-export function meetingRoomView({ t, meeting, org, mode, displayName = '', canInvite = false, backHref, call = '', userId = null }) {
+export function meetingRoomView({ t, meeting, org, mode, displayName = '', canInvite = false, backHref, call = '', userId = null, canRing = false }) {
   const e = (key, params) => escapeHtml(t(key, params));
   const boot = {
     meeting: { id: meeting.id, title: meeting.title, host_id: meeting.host_id, expires_at: meeting.expires_at },
@@ -124,6 +124,11 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
       </div>
       <div class="small text-uppercase opacity-75 mb-1">${e('client.meet.inCall')}</div>
       <ul class="list-unstyled" id="people-list"></ul>
+      ${canRing ? `<div class="mt-3" id="ring-box">
+        <div class="small text-uppercase opacity-75 mb-1">${e('client.meet.ringTitle')}</div>
+        <input class="form-control form-control-sm mb-2" type="search" id="ring-search" placeholder="${e('client.meet.ringSearch')}" autocomplete="off" aria-label="${e('client.meet.ringSearch')}">
+        <ul class="list-unstyled ring-list" id="ring-list"></ul>
+      </div>` : ''}
       ${canInvite ? `<form id="invite-form" class="mt-3">
         <div class="small text-uppercase opacity-75 mb-1">${e('client.meet.inviteGuest')}</div>
         <input class="form-control form-control-sm mb-2" type="email" name="email" placeholder="email@firma.ro" required>
