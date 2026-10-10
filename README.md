@@ -159,6 +159,19 @@ parameter (consistent hash).
 - F1: none.
 - F3: Shared Spaces between organizations (the schema allows it; grants and the "most restrictive policy wins" rule are missing).
 - F4: simulcast (lower resolution for thumbnails in large meetings).
+- End-to-end encryption over the SFU, so calls above `MESH_MAX_PARTICIPANTS`
+  stay end-to-end encrypted (the badge stays green and `media_sfu_allowed`
+  is no longer a trade-off):
+  - frames encrypted in the browser with WebRTC Encoded Transform
+    (`RTCRtpScriptTransform`, in a worker; AES-GCM), codec header left in
+    clear so the SFU can still forward; audio, camera and screen;
+  - keys never seen by our server or Cloudflare's proxy: each participant
+    makes an ECDH key pair in the browser, the server relays only public
+    keys, the call key is wrapped per participant; optional verification
+    code against an active man in the middle;
+  - new key whenever someone joins or leaves, without freezing the picture,
+    across the P2P ↔ SFU moves;
+  - first a prototype with three browsers on the real Cloudflare SFU.
 - F5: cross-node presence and typing, rqlite load tests, billing.
 - P1/P2: SSO (OIDC/SAML), external calendar, recordings, native apps.
 - Backup: `deploy/biptrix-backup` (database, files, secret, with a restore check); rqlite deployments use rqlite's own backups.
