@@ -138,8 +138,10 @@ parameter (consistent hash).
       dropped. A browser without `RTCRtpScriptTransform` cannot join a call
       (recent Chrome, Edge, Firefox, Safari all have it).
     - Tested with real Chrome: 2 people P2P, 3 through the real Cloudflare
-      SFU, moves P2P → SFU → P2P with rekeying (same code everywhere), and
-      a participant whose decryption was disabled decoding 0 video frames.
+      SFU, moves P2P → SFU → P2P with rekeying (same code everywhere),
+      screen sharing on both paths (received at 1280×720, every track
+      transformed), and a participant whose decryption was disabled
+      decoding 0 video frames.
   - `media_sfu_allowed` turned off keeps every call of that organization
     peer-to-peer, capped at 6 (fixed per meeting when it is created); with
     the encryption above it is no longer a privacy trade-off.
