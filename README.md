@@ -4,6 +4,12 @@ Multi-tenant chat and meetings platform (working name). Built from
 `Acme_Chat_Specificatii_Final_v1` (8 Oct 2026). It started for Acme and is
 designed to be sold as SaaS or self-hosted.
 
+It is a **PWA (Progressive Web App)**: the same web app runs in the browser
+and installs as an app — its own window and icon on Windows and macOS
+(Chrome, Edge), a WebAPK on Android, "Add to Home Screen" on iPhone —
+with push notifications, an unread count on the icon and calls that open
+in the app window. No app store, no native code.
+
 ## Principles
 
 - Node.js ≥ 22.13, ESM, no TypeScript, no build step.
@@ -52,7 +58,7 @@ to the console.
 | E-mail | Branded templates. Per-organization sender (e.g. `no-reply@company.com`, must be in the organization's company domains; account mail keeps the platform sender), with a test e-mail. Notification e-mails (direct messages and mentions to someone offline) are informative only: who wrote and where, never the message text. |
 | Policies | Per organization and versioned: external invitations on/off, who may invite, allowed/blocked domains, OTP, lobby, guest screen share, daily limits, duration, participants, file size, retention, e-mail notifications. |
 | Administration | Organization console: members and invitations, roles, revocation (closes sockets), Spaces (archive), announcements, policies, audit. Usable on phones: the sections wrap, tables become stacked cards. Operator console: tenants (create, suspend, limits), accounts (disable), health, platform audit. The operator has no access to tenant content. |
-| Mobile | Installable app. The on-screen keyboard never pushes the page off screen: Android shrinks it (`interactive-widget=resizes-content`), and full-screen pages (chat, call) size themselves from the visible height (`lib.js` `fitViewport`, also for iOS Safari and Android phones whose `100dvh` includes the gesture bar). No `viewport-fit=cover`, so pages stay clear of the system bars. Message lists read at the bottom stay there when they resize; Send does not take the focus, so the keyboard stays open. |
+| Mobile | Installable app (PWA: web app manifest `/manifest.webmanifest` with `display: standalone` and `handle_links`, service worker `/sw.js` for push and the icon count; in the installed app a call takes over the app window). The on-screen keyboard never pushes the page off screen: Android shrinks it (`interactive-widget=resizes-content`), and full-screen pages (chat, call) size themselves from the visible height (`lib.js` `fitViewport`, also for iOS Safari and Android phones whose `100dvh` includes the gesture bar). No `viewport-fit=cover`, so pages stay clear of the system bars. Message lists read at the bottom stay there when they resize; Send does not take the focus, so the keyboard stays open. |
 | Languages | English (default), Romanian, Spanish; chosen per user on the account page. |
 | Operations | `/healthz`, `/readyz`. Usage counters per tenant and month. Maintenance every 10 minutes: expired sessions, the 7-day event window, orphan uploads, retention, WAL checkpoint; collaborator expiry every minute. |
 
