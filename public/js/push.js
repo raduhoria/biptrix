@@ -17,12 +17,14 @@ export const needsInstall = () => IOS && !inApp();
 
 // How BipTrix can be installed from this browser: 'prompt' (the browser's
 // own dialog, public/js/theme.js keeps its offer), or steps from the
-// browser's menu: 'ios', 'firefox', 'samsung', 'android'. null: in the app
-// already, or a browser that cannot install it (desktop Firefox, ...).
+// browser's menu: 'ios', 'firefox', 'samsung', 'android', 'safari' (Mac,
+// Add to Dock). null: in the app already, or a browser that cannot install
+// it (desktop Firefox, ...).
 export function installWay() {
   if (inApp()) return null;
   if (window.installPrompt) return 'prompt';
   if (IOS) return 'ios';
+  if (/Macintosh/.test(UA) && /Version\/[\d.]+ Safari/.test(UA) && !/Chrome|Chromium|Edg|OPR|Firefox/.test(UA)) return 'safari';
   if (!/Android/.test(UA)) return null;
   if (/Firefox/.test(UA)) return 'firefox';
   if (/SamsungBrowser/.test(UA)) return 'samsung';
