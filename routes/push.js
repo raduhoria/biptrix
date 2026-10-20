@@ -18,6 +18,7 @@ export function registerPushRoutes(router, { auth, push, config }) {
   });
 
   const manifest = JSON.stringify({
+    id: '/',
     name: 'BipTrix',
     short_name: 'BipTrix',
     start_url: '/',
@@ -27,6 +28,9 @@ export function registerPushRoutes(router, { auth, push, config }) {
     // installed app where the browser supports it.
     handle_links: 'preferred',
     launch_handler: { client_mode: 'auto' },
+    // Lets the browser tab know the app is installed (Chrome on Android:
+    // getInstalledRelatedApps), so it does not offer to install it again.
+    related_applications: [{ platform: 'webapp', url: `${config.appUrl}/manifest.webmanifest` }],
     background_color: '#111318',
     theme_color: '#4f46e5',
     icons: [

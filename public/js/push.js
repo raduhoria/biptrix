@@ -5,14 +5,60 @@
 
 export const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 
+const UA = navigator.userAgent;
+// iPadOS says it is a Mac; it is the one with a touch screen.
+const IOS = /iPhone|iPad|iPod/.test(UA) || (/Macintosh/.test(UA) && navigator.maxTouchPoints > 1);
+
+// Running as the installed app (not in a browser tab).
+export const inApp = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
 // iPhone/iPad: push only works in the app added to the home screen.
-export const needsInstall = () => /iPhone|iPad|iPod/.test(navigator.userAgent) && !navigator.standalone && !matchMedia('(display-mode: standalone)').matches;
+export const needsInstall = () => IOS && !inApp();
+
+// How BipTrix can be installed from this browser: 'prompt' (the browser's
+// own dialog, public/js/theme.js keeps its offer), or steps from the
+// browser's menu: 'ios', 'firefox', 'samsung', 'android'. null: in the app
+// already, or a browser that cannot install it (desktop Firefox, ...).
+export function installWay() {
+  if (inApp()) return null;
+  if (window.installPrompt) return 'prompt';
+  if (IOS) return 'ios';
+  if (!/Android/.test(UA)) return null;
+  if (/Firefox/.test(UA)) return 'firefox';
+  if (/SamsungBrowser/.test(UA)) return 'samsung';
+  return 'android';
+}
+
+// Installed on this device, while looking at it in the browser: known when
+// it was installed from here, or (Chrome on Android) from the manifest's
+// related_applications.
+export async function installedApp() {
+  if (localStorage.getItem('app.installed') === '1') return true;
+  try {
+    return ((await navigator.getInstalledRelatedApps?.()) || []).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// The browser's install dialog (call from a click). True when accepted.
+export async function promptInstall() {
+  const offer = window.installPrompt;
+  if (!offer) return false;
+  window.installPrompt = null;
+  await offer.prompt();
+  return (await offer.userChoice).outcome === 'accepted';
+}
 
 const keyBytes = (key) => Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
 
 async function registration() {
   return (await navigator.serviceWorker.getRegistration('/')) || navigator.serviceWorker.register('/sw.js', { scope: '/' });
 }
+
+// Registered on every load of the app, not only once notifications are on:
+// some browsers offer to install a site only with a service worker.
+export const ensureWorker = () => 'serviceWorker' in navigator && registration().catch(() => null);
 
 async function send(path, body) {
   const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin' });

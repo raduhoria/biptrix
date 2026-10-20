@@ -11,3 +11,20 @@
     localStorage.setItem('theme', next);
   });
 })();
+
+// The browser's install offer (Chrome, Edge, Samsung Internet) comes once,
+// often before the page's modules run: kept here for the chat page's own
+// install banner (public/js/push.js), instead of the browser's mini-bar,
+// which shows only now and then.
+addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  // Offered again: not (or no longer) installed.
+  localStorage.removeItem('app.installed');
+  window.installPrompt = e;
+  dispatchEvent(new Event('installchange'));
+});
+addEventListener('appinstalled', () => {
+  window.installPrompt = null;
+  localStorage.setItem('app.installed', '1');
+  dispatchEvent(new Event('installchange'));
+});
