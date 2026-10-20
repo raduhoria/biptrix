@@ -1,5 +1,5 @@
 import { $, $$, EMOJI, api, debounce, esc, fitViewport, hue, icon, initials, randomId, renderMarkdown, toast, translator } from './lib.js';
-import { enablePush, needsInstall, pushSupported, refreshPush } from './push.js';
+import { enablePush, ensureWorker, inApp, installWay, installedApp, needsInstall, promptInstall, pushSupported, refreshPush } from './push.js';
 
 // Chat client for /o/:org. State lives in plain Maps; the DOM is re-rendered
 // per region (sidebar lists, message list, panel). Durable updates arrive as
@@ -884,8 +884,13 @@ function renderSoundToggle() {
   if (el) el.innerHTML = `${icon(soundOn() ? 'bell' : 'bell-off')} ${esc(t(soundOn() ? 'soundOn' : 'soundOff'))}`;
 }
 
-function askNotifications() {
-  if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+// On a click (a new conversation, a sent message): the browser asks once;
+// allowed, this device also gets push notifications.
+async function askNotifications() {
+  if (!('Notification' in window) || Notification.permission !== 'default') return;
+  if (!boot.push || !pushSupported() || needsInstall()) return Notification.requestPermission().catch(() => {});
+  state.pushActive = await enablePush(boot.push).catch(() => false);
+  renderPushBanner();
 }
 
 // ------------------------------------------------------------------ typing
@@ -1983,6 +1988,7 @@ document.addEventListener('submit', (e) => {
   const form = e.target.closest('.composer');
   if (form) {
     e.preventDefault();
+    askNotifications();
     submitComposer(form);
   }
 });
@@ -2115,29 +2121,64 @@ function reportVisible() {
 }
 for (const ev of ['visibilitychange', 'focus', 'blur']) (ev === 'visibilitychange' ? document : window).addEventListener(ev, reportVisible);
 
-// Offer notifications on this device once (dismissable); refresh silently
-// where they were already allowed. iPhone: only in the installed app.
+// Installing the app and notifications on this device, offered in the
+// sidebar until done. "Later" only snoozes them (a day for notifications,
+// a few for the rest): they come back, after a sign-in too. iPhone/iPad:
+// notifications only in the installed app, so the install comes first.
+const SNOOZE_DAYS = { install: 3, installed: 7, push: 1, denied: 7 };
+const snoozed = (key) => Number(localStorage.getItem(`snooze.${key}`)) > Date.now();
+let appInstalled = false;
+
+function deviceOffers() {
+  const items = [];
+  const way = installWay();
+  if (way && !(way !== 'prompt' && appInstalled)) {
+    if (!snoozed('install')) items.push({ key: 'install', text: t(`install_${way}`), action: way === 'prompt' ? t('installNow') : null });
+  } else if (appInstalled && !inApp() && !snoozed('installed')) items.push({ key: 'installed', text: t('installedOpen') });
+  if (boot.push && pushSupported() && !needsInstall() && !state.pushActive) {
+    if (Notification.permission === 'denied') {
+      if (!snoozed('denied')) items.push({ key: 'denied', text: t('pushDenied') });
+    } else if (!snoozed('push')) items.push({ key: 'push', text: t('pushOffer'), action: t('pushEnable') });
+  }
+  return items;
+}
+
 function renderPushBanner() {
   const box = $('#push-banner');
-  const dismissed = localStorage.getItem('push.dismissed') === '1';
-  const offer = boot.push && pushSupported() && !state.pushActive && Notification.permission === 'default' && !dismissed;
-  const install = boot.push && needsInstall() && !dismissed;
-  box.hidden = !(offer || install);
-  if (box.hidden) return;
-  box.innerHTML = `<div class="small">${icon('bell')} ${esc(t(install ? 'pushInstallHint' : 'pushOffer'))}</div>
-    <div class="d-flex gap-2 mt-2">${install ? '' : `<button class="btn btn-primary btn-sm" data-push="enable">${esc(t('pushEnable'))}</button>`}
-    <button class="btn btn-link btn-sm p-0" data-push="dismiss">${esc(t('pushLater'))}</button></div>`;
+  const items = deviceOffers();
+  box.hidden = !items.length;
+  box.innerHTML = items
+    .map(
+      (i) => `<div class="push-item" data-offer="${i.key}"><div class="small">${icon(i.key.startsWith('install') ? 'download' : 'bell')} ${esc(i.text)}</div>
+    <div class="d-flex gap-2 mt-2">${i.action ? `<button class="btn btn-primary btn-sm" data-push="go">${esc(i.action)}</button>` : ''}
+    <button class="btn btn-link btn-sm p-0" data-push="later">${esc(t('pushLater'))}</button></div></div>`
+    )
+    .join('');
 }
-document.addEventListener('click', async (e) => {
+$('#push-banner').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-push]');
   if (!btn) return;
-  if (btn.dataset.push === 'dismiss') localStorage.setItem('push.dismissed', '1');
+  const key = btn.closest('[data-offer]').dataset.offer;
+  if (btn.dataset.push === 'later') localStorage.setItem(`snooze.${key}`, String(Date.now() + SNOOZE_DAYS[key] * 86_400_000));
+  else if (key === 'install') await promptInstall().catch(() => false);
   else {
     state.pushActive = await enablePush(boot.push).catch(() => false);
     toast(t(state.pushActive ? 'pushOn' : 'pushBlocked'), state.pushActive ? 'success' : 'warning');
   }
   renderPushBanner();
 });
+addEventListener('installchange', renderPushBanner);
+// Allowed or blocked from the browser's site settings meanwhile.
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && renderPushBanner());
+navigator.permissions
+  ?.query({ name: 'notifications' })
+  .then((status) =>
+    status.addEventListener('change', async () => {
+      state.pushActive = await refreshPush(boot.push);
+      renderPushBanner();
+    })
+  )
+  .catch(() => {});
 
 // Company announcements pinned in the sidebar, each between two calendar
 // days of the viewer's own date. Hiding one is per device and lasts until
@@ -2214,7 +2255,9 @@ fitViewport();
   }
   route();
   socket.connect();
+  ensureWorker();
   state.pushActive = await refreshPush(boot.push);
+  appInstalled = await installedApp();
   renderPushBanner();
   renderSoundToggle();
   // Outbox entries from before a reload are retried once connected; if the

@@ -247,6 +247,9 @@ describe('push notifications', () => {
     assert.equal(manifest.data.display, 'standalone');
     assert.ok(manifest.data.icons.some((i) => i.sizes === '512x512'));
     assert.equal(manifest.data.handle_links, 'preferred');
+    // The browser tab can tell the app is installed (no install offer then).
+    assert.equal(manifest.data.related_applications[0].platform, 'webapp');
+    assert.match(manifest.data.related_applications[0].url, /\/manifest\.webmanifest$/);
     // A new call window starts on a page of the app (opens in the app).
     const calling = await bobClient.get(`${API()}`.replace('/api', '') + '/calling');
     assert.equal(calling.status, 200);
