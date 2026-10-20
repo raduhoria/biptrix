@@ -146,7 +146,10 @@ function frame({ t, preheader, eyebrow, title, intro, details = [], quote = null
   ]
     .filter((x) => x !== '')
     .join('\n');
-  return { subject: title, text, html };
+  // A code goes in the subject too: each mail gets its own (Gmail groups
+  // same-subject mails and hides the repeated part, the new code with it),
+  // and the code shows in the phone's notification.
+  return { subject: code ? `${code} – ${title}` : title, text, html };
 }
 
 const ROLE = (t, role) => (role ? t(`roles.${role}`) : '');
