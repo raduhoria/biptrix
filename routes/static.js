@@ -36,7 +36,11 @@ export function registerStatic(router, publicDir, { dev = false } = {}) {
       return res.status(404).send('Not found');
     }
     res.setHeader('ETag', entry.etag);
-    res.setHeader('Cache-Control', relative.startsWith('vendor/') ? 'public, max-age=604800' : 'public, max-age=300, must-revalidate');
+    // Our JS and CSS are always revalidated (a 304 when unchanged): right
+    // after a release, a new module importing from a cached old one would
+    // not start. Vendor files only change with their path.
+    const always = relative.startsWith('js/') || relative.startsWith('css/');
+    res.setHeader('Cache-Control', relative.startsWith('vendor/') ? 'public, max-age=604800' : always ? 'no-cache' : 'public, max-age=300, must-revalidate');
     if (req.headers['if-none-match'] === entry.etag) return res.status(304).end();
     res.type(entry.type).send(entry.body);
   }
