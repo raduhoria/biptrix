@@ -4,11 +4,11 @@ import { appError, isoIn, newId, nowIso, safeEqualHex } from './util.js';
 export const CODE_TTL_MINUTES = 10;
 const MAX_ATTEMPTS = 5;
 const RESEND_MS = 60_000;
-const MAX_PER_HOUR = 5;
+const MAX_PER_HOUR = 20;
 
 // Passwordless sign-in: a 6-digit code sent by e-mail. Only an HMAC is
 // stored; a code expires after 10 minutes, is single-use, dies after 5 wrong
-// attempts; issuing is limited per user (1/minute, 5/hour). Mainly for
+// attempts; issuing is limited per user (1/minute, 20/hour). Mainly for
 // external collaborators who sign in rarely and have no password.
 export function createLoginCodes({ db, secret }) {
   const hash = (userId, code) => createHmac('sha256', secret).update(`login:${userId}:${code}`).digest('hex');
