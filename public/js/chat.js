@@ -119,7 +119,10 @@ const socket = (() => {
         waiting.get(msg.re)(msg);
         waiting.delete(msg.re);
       }
-      if (msg.type === 'hello') reportVisible();
+      if (msg.type === 'hello') {
+        reportVisible();
+        if (msg.data?.release && boot.release && msg.data.release !== boot.release) showUpdate();
+      }
       if (msg.type === 'system.sync') return onSync(msg.data);
       if (msg.event_id && syncing) return buffered.push(msg);
       handle(msg);
@@ -2179,6 +2182,27 @@ navigator.permissions
     })
   )
   .catch(() => {});
+
+// After a deploy (the socket reconnects to a server with another release):
+// a bar offers to reload, it does not reload by itself — a half-written
+// message or an open dialog stays until the user chooses. Unsent messages
+// are kept across the reload anyway (the outbox).
+function showUpdate() {
+  if ($('#update-bar')) return;
+  const bar = document.createElement('div');
+  bar.id = 'update-bar';
+  bar.className = 'update-bar shadow';
+  bar.setAttribute('role', 'status');
+  bar.innerHTML = `${icon('info')}<span>${esc(t('updateReady'))}</span>
+    <button class="btn btn-light btn-sm" data-update="reload">${esc(t('updateReload'))}</button>
+    <button class="btn btn-icon btn-sm" data-update="close" aria-label="${esc(t('updateLater'))}" title="${esc(t('updateLater'))}">${icon('x')}</button>`;
+  bar.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-update]');
+    if (btn?.dataset.update === 'reload') location.reload();
+    else if (btn) bar.remove();
+  });
+  document.body.append(bar);
+}
 
 // Company announcements pinned in the sidebar, each between two calendar
 // days of the viewer's own date. Hiding one is per device and lasts until
