@@ -115,9 +115,25 @@ function setEnded(titleKey, textKey = '', allowRejoin = false) {
 
 // ------------------------------------------------------------- local media
 
+// The chosen device, else (unplugged, or its id changed: ids are per site
+// and are renewed when site data is cleared) the default one; the stale
+// choice is forgotten so it does not fail every time.
+async function capture(kind, constraints) {
+  const media = kind === 'cam' ? 'video' : 'audio';
+  const id = state.devices[kind];
+  try {
+    return await navigator.mediaDevices.getUserMedia({ [media]: { ...constraints, deviceId: id ? { exact: id } : undefined } });
+  } catch (err) {
+    if (!id || !['OverconstrainedError', 'NotFoundError', 'NotReadableError'].includes(err.name)) throw err;
+    state.devices[kind] = '';
+    localStorage.removeItem(`meet.${kind}Id`);
+    return navigator.mediaDevices.getUserMedia({ [media]: constraints });
+  }
+}
+
 async function startCamera() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: state.devices.cam ? { exact: state.devices.cam } : undefined, width: { ideal: 1280 }, height: { ideal: 720 } } });
+    const stream = await capture('cam', { width: { ideal: 1280 }, height: { ideal: 720 } });
     state.local.video = stream.getVideoTracks()[0];
   } catch (err) {
     state.cam = false;
@@ -127,9 +143,7 @@ async function startCamera() {
 
 async function startMic() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { deviceId: state.devices.mic ? { exact: state.devices.mic } : undefined, echoCancellation: true, noiseSuppression: state.noise !== 'off', autoGainControl: true },
-    });
+    const stream = await capture('mic', { echoCancellation: true, noiseSuppression: state.noise !== 'off', autoGainControl: true });
     state.local.audioRaw = stream.getAudioTracks()[0];
     state.local.audio = await noiseFilter(state.local.audioRaw);
     state.local.audio.enabled = state.mic;
@@ -1531,6 +1545,9 @@ async function toggleCam() {
   renderPreview();
   renderLocalTile();
   announceMedia();
+  // Before the camera was allowed the browser does not list it (Safari) or
+  // lists it without a name (Chrome): asked again once it is.
+  if (state.cam) await listDevices().catch(() => {});
 }
 
 async function toggleScreen() {
