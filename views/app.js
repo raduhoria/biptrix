@@ -1,4 +1,5 @@
 import { can } from '../core/orgs.js';
+import { releaseId } from '../core/release.js';
 import { escapeHtml, icon, initials, jsonData, page } from './layout.js';
 
 // The chat application shell for /o/:org. Server-rendered frame; lists,
@@ -32,6 +33,9 @@ export function chatView({ t, user, org, membership, orgs, config, isOperator })
     maxUploadMb: Math.round(config.maxUploadBytes / 1048576),
     // Web Push: the server's public key ('' when push is not configured).
     push: config.push.publicKey && config.push.privateKey ? config.push.publicKey : '',
+    // This page's release (core/release.js): another one in the socket's
+    // hello means a deploy happened since.
+    release: releaseId(),
   };
 
   return page({

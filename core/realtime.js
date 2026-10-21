@@ -2,6 +2,7 @@ import { WebSocketServer } from 'ws';
 import { parseCookies } from './router.js';
 import { createRateLimiter } from './rate-limit.js';
 import { clientIp, isSecure, originMatches } from './http.js';
+import { releaseId } from './release.js';
 
 const PROTOCOL = 1;
 const HEARTBEAT_MS = 25_000;
@@ -181,7 +182,7 @@ export function createRealtime({ config, auth, orgs, chat, events, rooms, notifi
     ws.on('close', () => dropSocket(ws));
     ws.on('error', () => {});
     addSocket(ws);
-    send(ws, 'hello', { protocol: PROTOCOL, node: config.nodeId, cursor: events.cursor() });
+    send(ws, 'hello', { protocol: PROTOCOL, node: config.nodeId, release: releaseId(), cursor: events.cursor() });
   }
 
   // Chat sockets only: meeting sockets share this WebSocket server but have

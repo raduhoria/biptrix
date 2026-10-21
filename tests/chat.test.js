@@ -87,6 +87,11 @@ describe('chat', () => {
     await Promise.all([wsA.opened, wsB.opened]);
     const hello = await wsB.next('hello');
     let cursor = hello.data.cursor;
+    // The page and the socket name the same release (a tab offers to
+    // reload when they differ, after a deploy).
+    const page = await b.get(`/o/${orgA.slug}`);
+    assert.match(hello.data.release, /^[0-9a-f]{12}$/);
+    assert.ok(page.text.includes(`"release":"${hello.data.release}"`));
 
     const ack = await wsA.request('message.send', { conversation_id: space.id, client_message_id: 'ws-msg-000001', body: 'live' });
     assert.equal(ack.type, 'message.ack');
