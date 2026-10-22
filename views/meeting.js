@@ -159,7 +159,7 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
 // the organization (or not signed in): who signs in, and that a guest comes
 // in through their own e-mailed invitation, not this link. The meeting's
 // title is not shown.
-export function meetingGateView({ t, org, user, next }) {
+export function meetingGateView({ t, org, user, next, open = false, email = '', name = '', sent = false, error = '', notice = '' }) {
   const e = (key, params) => escapeHtml(t(key, params));
   const login = `/login?next=${encodeURIComponent(next)}`;
   const body = `<div class="guest-meeting mb-4">
@@ -176,7 +176,18 @@ export function meetingGateView({ t, org, user, next }) {
       : `<a class="btn btn-primary w-100 mb-4" href="${escapeHtml(login)}">${e('guest.gateSignIn')}</a>`
   }
   <h2 class="h6">${e('guest.gateGuestTitle')}</h2>
-  <p class="small mb-0">${e('guest.gateGuestText')}</p>`;
+  <p class="small${open ? '' : ' mb-0'}">${e('guest.gateGuestText')}</p>
+  ${alerts({ error, notice })}
+  ${
+    open && !sent
+      ? `<form method="post" action="${escapeHtml(next)}/knock" class="knock-form">
+      <p class="small text-body-secondary mb-2">${e('guest.knockHelp')}</p>
+      <input class="form-control mb-2" type="email" name="email" value="${escapeHtml(email || user?.email || '')}" placeholder="${e('guest.knockEmail')}" aria-label="${e('guest.knockEmail')}" autocomplete="email" required>
+      <input class="form-control mb-2" name="name" value="${escapeHtml(name || user?.name || '')}" placeholder="${e('guest.knockName')}" aria-label="${e('guest.knockName')}" autocomplete="name" maxlength="80">
+      <button class="btn btn-outline-primary w-100">${icon('mail')} ${e('guest.knock')}</button>
+    </form>`
+      : ''
+  }`;
   return authPage({ t, title: t('guest.gateTitle'), path: next, body });
 }
 

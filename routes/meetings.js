@@ -2,7 +2,7 @@ import { orgSender } from '../core/mailer.js';
 import { INTL_LOCALE, createTranslator, translateError } from '../core/i18n.js';
 import { readForm, readJson } from '../core/router.js';
 import { can } from '../core/orgs.js';
-import { appError, newId } from '../core/util.js';
+import { appError, canonicalEmail, isEmail, newId } from '../core/util.js';
 import { meetingInviteEmail, memberMeetingEmail, otpEmail } from '../views/emails.js';
 import { messagePage } from '../views/layout.js';
 import { guestJoinView, meetingGateView, meetingRoomView } from '../views/meeting.js';
@@ -174,16 +174,39 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
   // that says what to do (sign in, or join from the e-mailed invitation)
   // instead of a sign-in form a guest cannot get through. A guest already
   // verified for this meeting goes to their room.
+  async function gateTarget(req) {
+    const org = await orgs.bySlug(req.params.org);
+    if (!org || (req.user && (await orgs.membership(org.id, req.user.id)))) return null;
+    const meeting = await meetings.byId(req.params.id);
+    return meeting && meeting.org_id === org.id ? { org, meeting } : null;
+  }
+  const gatePage = (req, { org, meeting }, extra = {}) =>
+    meetingGateView({ t: req.t, org, user: req.user, next: `/o/${org.slug}/meet/${meeting.id}`, open: org.status === 'active' && meetings.isOpen(meeting), ...extra });
+
   async function meetingGate(req, res, next) {
     if (req.pendingMfa) return next();
-    const org = await orgs.bySlug(req.params.org);
-    if (!org || (req.user && (await orgs.membership(org.id, req.user.id)))) return next();
-    const meeting = await meetings.byId(req.params.id);
-    if (!meeting || meeting.org_id !== org.id) return next();
+    const found = await gateTarget(req);
+    if (!found) return next();
     const guest = await meetings.guestFromToken(req.cookies[GUEST_COOKIE]);
-    if (guest?.meeting.id === meeting.id) return res.redirect(`/meet/${meeting.id}`);
-    res.status(req.user ? 403 : 200).send(meetingGateView({ t: req.t, org, user: req.user, next: req.url }));
+    if (guest?.meeting.id === found.meeting.id) return res.redirect(`/meet/${found.meeting.id}`);
+    res.status(req.user ? 403 : 200).send(gatePage(req, found));
   }
+
+  // "Ask to join" from that page: the managers in the room see the request
+  // and invite the address by e-mail (core/meeting-rooms.js knock). The
+  // answer says whether anyone could see it, nothing about the meeting.
+  router.post('/o/:org/meet/:id/knock', async (req, res) => {
+    const found = await gateTarget(req);
+    if (!found) throw appError('not_found', 'Meeting not found');
+    const form = await readForm(req);
+    const email = canonicalEmail(form.get('email'));
+    const name = String(form.get('name') || '').trim().slice(0, 80);
+    const fields = { email: email.slice(0, 254), name };
+    if (!isEmail(email)) return res.status(400).send(gatePage(req, found, { ...fields, error: req.t('errors.invalidEmail') }));
+    if (!(await auth.takeAttempt([[`knock-ip:${req.ip}`, 10], [`knock:${found.meeting.id}`, 40]]))) return res.status(429).send(gatePage(req, found, { ...fields, error: req.t('auth.tooMany') }));
+    const seen = found.org.status === 'active' && meetings.isOpen(found.meeting) && (await rooms.knock(found.meeting.id, { email, name }));
+    res.send(gatePage(req, found, seen ? { ...fields, sent: true, notice: req.t('guest.knockSent', { email }) } : { ...fields, error: req.t('guest.knockNobody') }));
+  });
 
   router.get('/o/:org/meet/:id', meetingGate, ...member, async (req, res) => {
     const meeting = await meetings.requireMeeting(req.org, req.params.id);
