@@ -152,6 +152,7 @@ export async function createApp(config, { quiet = false } = {}) {
       await push.prune();
       await calls.sweep();
       await meetings.closeExpired();
+      await meetings.pruneKnocks();
       await expireAccess();
       await events.prune(7);
       await files.pruneOrphans();
