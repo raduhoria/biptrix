@@ -5,7 +5,7 @@ import { can } from '../core/orgs.js';
 import { appError, newId } from '../core/util.js';
 import { meetingInviteEmail, memberMeetingEmail, otpEmail } from '../views/emails.js';
 import { messagePage } from '../views/layout.js';
-import { guestJoinView, meetingRoomView } from '../views/meeting.js';
+import { guestJoinView, meetingGateView, meetingRoomView } from '../views/meeting.js';
 
 const GUEST_COOKIE = 'gsid';
 
@@ -170,7 +170,22 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     });
   }
 
-  router.get('/o/:org/meet/:id', ...member, async (req, res) => {
+  // The colleagues' link opened by someone outside the organization: a page
+  // that says what to do (sign in, or join from the e-mailed invitation)
+  // instead of a sign-in form a guest cannot get through. A guest already
+  // verified for this meeting goes to their room.
+  async function meetingGate(req, res, next) {
+    if (req.pendingMfa) return next();
+    const org = await orgs.bySlug(req.params.org);
+    if (!org || (req.user && (await orgs.membership(org.id, req.user.id)))) return next();
+    const meeting = await meetings.byId(req.params.id);
+    if (!meeting || meeting.org_id !== org.id) return next();
+    const guest = await meetings.guestFromToken(req.cookies[GUEST_COOKIE]);
+    if (guest?.meeting.id === meeting.id) return res.redirect(`/meet/${meeting.id}`);
+    res.status(req.user ? 403 : 200).send(meetingGateView({ t: req.t, org, user: req.user, next: req.url }));
+  }
+
+  router.get('/o/:org/meet/:id', meetingGate, ...member, async (req, res) => {
     const meeting = await meetings.requireMeeting(req.org, req.params.id);
     const back = `/o/${req.org.slug}${meeting.conversation_id ? `/c/${meeting.conversation_id}` : '/meetings'}`;
     if (!meetings.isOpen(meeting)) return res.status(410).send(messagePage({ t: req.t, title: meeting.title, message: req.t('errors.meetingEnded'), back }));
