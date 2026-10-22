@@ -6,6 +6,9 @@ const OTP_MAX_ATTEMPTS = 5;
 const OTP_RESEND_MS = 60_000;
 const OTP_MAX_PER_HOUR = 5;
 const ACTIVE = ['scheduled', 'open', 'live'];
+// "Ask to join" requests: shown this long, at most this many per meeting.
+const KNOCK_TTL_MS = 30 * 60_000;
+const KNOCK_MAX = 20;
 
 // createMeetings: meeting lifecycle, internal and external invitations, the
 // guest e-mail OTP flow, guest sessions and the lobby (spec §8–9). Media
@@ -357,6 +360,37 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
     return rows.length;
   }
 
+  // ------------------------------------------------------- ask to join
+  // A request from the colleagues' link (routes/meetings.js). Stored, so it
+  // survives a restart and reaches the managers on any node: each change is
+  // a `meeting.knock` event to the host (core/meeting-rooms.js refreshes the
+  // managers' lobby from it). Asking again replaces the earlier request.
+  const knockEvent = (meeting) => events.statement({ orgId: meeting.org_id, userId: meeting.host_id, type: 'meeting.knock', data: { meeting_id: meeting.id } });
+
+  async function knock(meeting, { email, name }) {
+    await db.batch([
+      ['DELETE FROM meeting_knocks WHERE meeting_id = ? AND email = ?', [meeting.id, email]],
+      ['INSERT INTO meeting_knocks (id, meeting_id, email, name, created_at) VALUES (?, ?, ?, ?, ?)', [newId(), meeting.id, email, name || null, nowIso()]],
+      [`DELETE FROM meeting_knocks WHERE meeting_id = ? AND id NOT IN (SELECT id FROM meeting_knocks WHERE meeting_id = ? ORDER BY created_at DESC LIMIT ${KNOCK_MAX})`, [meeting.id, meeting.id]],
+      knockEvent(meeting),
+    ]);
+    events.notify();
+  }
+
+  const knocks = (meetingId) =>
+    db.all('SELECT id, email, name FROM meeting_knocks WHERE meeting_id = ? AND created_at >= ? ORDER BY created_at', [meetingId, new Date(Date.now() - KNOCK_TTL_MS).toISOString()]);
+
+  // Answered: dismissed by a manager (by id), or the address came in through
+  // its invitation (by e-mail).
+  async function dismissKnock(meeting, { id = null, email = null }) {
+    const res = await db.run('DELETE FROM meeting_knocks WHERE meeting_id = ? AND (id = ? OR email = ?)', [meeting.id, id, email]);
+    if (!res.changes) return;
+    await db.batch([knockEvent(meeting)]);
+    events.notify();
+  }
+
+  const pruneKnocks = () => db.run('DELETE FROM meeting_knocks WHERE created_at < ?', [new Date(Date.now() - KNOCK_TTL_MS).toISOString()]);
+
   async function markLive(meeting) {
     await db.run("UPDATE meetings SET state = 'live', started_at = COALESCE(started_at, ?) WHERE id = ? AND state IN ('scheduled', 'open')", [nowIso(), meeting.id]);
   }
@@ -445,6 +479,10 @@ export function createMeetings({ db, policies, audit, appSecret, events }) {
     close,
     closeExpired,
     markLive,
+    knock,
+    knocks,
+    dismissKnock,
+    pruneKnocks,
     markIdle,
     recordLeave,
     listForUser,

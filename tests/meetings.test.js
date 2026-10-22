@@ -85,13 +85,21 @@ describe('meetings and external guests', () => {
     assert.ok(!sent.text.includes('action="/o/'), 'the form is gone once sent');
     const update = await hostWs.next('lobby.update', 3000, (m) => m.data.requests?.length);
     assert.deepEqual(update.data.requests.map((k) => [k.email, k.name]), [['cosmin@extern.com', 'Cosmin']]);
+    // Stored: the host's page reloaded (or another node) still sees it.
+    assert.equal((await app.db.get('SELECT COUNT(*) AS n FROM meeting_knocks WHERE meeting_id = ?', [meeting.id])).n, 1);
+    hostWs.close();
+    const again = socket(app.base, `/ws/meeting?id=${meeting.id}`, hostClient);
+    await again.opened;
+    again.send('join', {});
+    const seen = await again.next('lobby.update', 3000, (m) => m.data.requests?.length);
+    assert.equal(seen.data.requests[0].email, 'cosmin@extern.com');
     // The host invites the address (the usual invitation) and dismisses it.
     assert.equal((await hostClient.post(`${API()}/meetings/${meeting.id}/invitations`, { json: { email: 'cosmin@extern.com', name: 'Cosmin' } })).status, 200);
     assert.ok(app.mailer.sent.some((m) => m.to === 'cosmin@extern.com' && /\/join\//.test(m.text)));
-    hostWs.send('knock.dismiss', { id: update.data.requests[0].id });
-    const after = await hostWs.next('lobby.update', 3000, (m) => !m.data.requests.length);
+    again.send('knock.dismiss', { id: update.data.requests[0].id });
+    const after = await again.next('lobby.update', 3000, (m) => !m.data.requests.length);
     assert.deepEqual(after.data.requests, []);
-    hostWs.close();
+    again.close();
   });
 
   test('guest joins after OTP and lobby admission (criterion 18)', async () => {

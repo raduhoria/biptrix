@@ -393,6 +393,17 @@ CREATE INDEX IF NOT EXISTS idx_meeting_participants_meeting ON meeting_participa
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_participants_user ON meeting_participants(meeting_id, user_id) WHERE user_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_participants_invitation ON meeting_participants(meeting_id, invitation_id) WHERE invitation_id IS NOT NULL;
 
+-- "Ask to join" from the colleagues' link: an address without an invitation,
+-- shown to the meeting's managers until invited or dismissed (or stale).
+CREATE TABLE IF NOT EXISTS meeting_knocks (
+  id TEXT PRIMARY KEY,
+  meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  name TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_knocks_email ON meeting_knocks(meeting_id, email);
+
 -- -------------------------------------------------------------------- audit
 
 -- Append-only: the application never updates or deletes audit rows.

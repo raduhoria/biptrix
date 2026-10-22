@@ -193,7 +193,7 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
   }
 
   // "Ask to join" from that page: the managers in the room see the request
-  // and invite the address by e-mail (core/meeting-rooms.js knock). The
+  // and invite the address by e-mail (core/meetings.js knock). The
   // answer says whether anyone could see it, nothing about the meeting.
   router.post('/o/:org/meet/:id/knock', async (req, res) => {
     const found = await gateTarget(req);
@@ -204,7 +204,10 @@ export function registerMeetingRoutes(router, { auth, orgs, chat, meetings, room
     const fields = { email: email.slice(0, 254), name };
     if (!isEmail(email)) return res.status(400).send(gatePage(req, found, { ...fields, error: req.t('errors.invalidEmail') }));
     if (!(await auth.takeAttempt([[`knock-ip:${req.ip}`, 10], [`knock:${found.meeting.id}`, 40]]))) return res.status(429).send(gatePage(req, found, { ...fields, error: req.t('auth.tooMany') }));
-    const seen = found.org.status === 'active' && meetings.isOpen(found.meeting) && (await rooms.knock(found.meeting.id, { email, name }));
+    // Only while the meeting is under way (someone in it): before, nobody
+    // would see the request.
+    const seen = found.org.status === 'active' && meetings.isOpen(found.meeting) && found.meeting.state === 'live';
+    if (seen) await meetings.knock(found.meeting, { email, name });
     res.send(gatePage(req, found, seen ? { ...fields, sent: true, notice: req.t('guest.knockSent', { email }) } : { ...fields, error: req.t('guest.knockNobody') }));
   });
 
