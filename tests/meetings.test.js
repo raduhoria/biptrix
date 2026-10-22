@@ -66,6 +66,34 @@ describe('meetings and external guests', () => {
     assert.equal((await client(app.base).get(`/o/${org.slug}/meet/nope`)).status, 303);
   });
 
+  test('"ask to join" reaches the managers in the room, who invite by e-mail', async () => {
+    const meeting = await createMeeting([]);
+    const knock = (form) => client(app.base).post(`/o/${org.slug}/meet/${meeting.id}/knock`, { form });
+    // Nobody in the room yet: said so, nothing kept.
+    const early = await knock({ email: 'cosmin@extern.com', name: 'Cosmin' });
+    assert.equal(early.status, 200);
+    assert.ok(!early.text.includes('cosmin@extern.com</'));
+    assert.match(early.text, /alert-danger/);
+    assert.equal((await knock({ email: 'nu-e-email' })).status, 400);
+
+    const hostWs = socket(app.base, `/ws/meeting?id=${meeting.id}`, hostClient);
+    await hostWs.opened;
+    hostWs.send('join', {});
+    await hostWs.next('joined');
+    const sent = await knock({ email: 'Cosmin@Extern.com', name: 'Cosmin' });
+    assert.equal(sent.status, 200);
+    assert.ok(!sent.text.includes('action="/o/'), 'the form is gone once sent');
+    const update = await hostWs.next('lobby.update', 3000, (m) => m.data.requests?.length);
+    assert.deepEqual(update.data.requests.map((k) => [k.email, k.name]), [['cosmin@extern.com', 'Cosmin']]);
+    // The host invites the address (the usual invitation) and dismisses it.
+    assert.equal((await hostClient.post(`${API()}/meetings/${meeting.id}/invitations`, { json: { email: 'cosmin@extern.com', name: 'Cosmin' } })).status, 200);
+    assert.ok(app.mailer.sent.some((m) => m.to === 'cosmin@extern.com' && /\/join\//.test(m.text)));
+    hostWs.send('knock.dismiss', { id: update.data.requests[0].id });
+    const after = await hostWs.next('lobby.update', 3000, (m) => !m.data.requests.length);
+    assert.deepEqual(after.data.requests, []);
+    hostWs.close();
+  });
+
   test('guest joins after OTP and lobby admission (criterion 18)', async () => {
     const meeting = await createMeeting();
     const { g } = await verifiedGuest();

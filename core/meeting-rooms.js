@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 const PROTOCOL = 1;
 const RECHECK_MS = 10_000;
 // A participant whose socket drops without leaving (network blip, server
@@ -40,6 +42,9 @@ const GRACE_MS = 20_000;
 // admitted.
 const SLOTS = ['audio', 'camera', 'screen'];
 const CHAT_RATE = [10, 10_000]; // messages per window, per connection
+// "Ask to join" requests: kept this long, at most this many per room.
+const KNOCK_TTL_MS = 15 * 60_000;
+const KNOCK_MAX = 20;
 export function createRooms({ auth, orgs, meetings, media, chat, users, notifier }) {
   const rooms = new Map(); // meetingId → { meeting, peers: Map<pid, ws>, lobby: Map<pid, ws> }
   // Calls (core/calls.js) follow who joins and when a room empties.
@@ -68,7 +73,7 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
     if (!r) {
       const sfuAllowed = JSON.parse(meeting.policy_snapshot || '{}').media_sfu_allowed !== false;
       const mode = sfuAllowed ? media.topology : 'mesh';
-      r = { meeting, peers: new Map(), lobby: new Map(), mode, topology: mode === 'sfu' ? 'sfu' : 'mesh', backTimer: null };
+      r = { meeting, peers: new Map(), lobby: new Map(), knocks: new Map(), mode, topology: mode === 'sfu' ? 'sfu' : 'mesh', backTimer: null };
       rooms.set(meeting.id, r);
     }
     r.meeting = meeting;
@@ -118,7 +123,26 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
 
   async function lobbyUpdate(r) {
     const waiting = [...r.lobby.values()].map((ws) => ({ id: ws.participant.id, name: ws.participant.display_name, guest: !ws.participant.user_id, email: ws.ctx.inv?.email || ws.ctx.user?.email || '' }));
-    for (const ws of await managers(r)) send(ws, 'lobby.update', { waiting });
+    const cutoff = Date.now() - KNOCK_TTL_MS;
+    for (const [id, k] of r.knocks) if (k.at < cutoff) r.knocks.delete(id);
+    const requests = [...r.knocks.values()].map(({ id, email, name }) => ({ id, email, name }));
+    for (const ws of await managers(r)) send(ws, 'lobby.update', { waiting, requests });
+  }
+
+  // "Ask to join" from the colleagues' link (routes/meetings.js): someone
+  // without an invitation leaves an address; the managers in the room see
+  // it next to the lobby and invite it by e-mail (the usual invitation and
+  // code), or dismiss it. Kept in memory, only while a manager is in the
+  // room on this node: false otherwise (nobody would see it).
+  async function knock(meetingId, { email, name }) {
+    const r = rooms.get(meetingId);
+    if (!r || !(await managers(r)).length) return false;
+    for (const [id, k] of r.knocks) if (k.email === email) r.knocks.delete(id);
+    if (r.knocks.size >= KNOCK_MAX) r.knocks.delete(r.knocks.keys().next().value);
+    const id = randomBytes(8).toString('hex');
+    r.knocks.set(id, { id, email, name, at: Date.now() });
+    await lobbyUpdate(r);
+    return true;
   }
 
   async function authorizeUpgrade(req, url) {
@@ -174,6 +198,8 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
     ws.media = { audio: !!data.audio, video: !!data.video, screen: !!data.screen && (!!participant.user_id || !!policy.guest_screen_share) };
     ws.page = typeof data.page === 'string' ? data.page.slice(0, 40) : '';
     if (participant.state === 'lobby') {
+      // Invited after asking to join: the request is answered.
+      for (const [id, k] of r.knocks) if (k.email === ws.ctx.inv?.email) r.knocks.delete(id);
       r.lobby.set(participant.id, ws);
       send(ws, 'lobby', { meeting: { id: meeting.id, title: meeting.title } });
       return lobbyUpdate(r);
@@ -441,6 +467,11 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
           if (data.screen && !screen) send(ws, 'error', { code: 'policy_denied', reason: 'screenShare' });
           return broadcast(r, 'peer.media', { id: ws.participant.id, media: ws.media }, ws);
         }
+        case 'knock.dismiss': {
+          await requireManager(ws);
+          if (r?.knocks.delete(String(data.id || ''))) await lobbyUpdate(r);
+          return;
+        }
         case 'admit': {
           const meeting = await requireManager(ws);
           const p = await meetings.admit(meeting, actor(ws), String(data.participant_id || ''), !!data.accept, ws.ctx.ip);
@@ -616,6 +647,7 @@ export function createRooms({ auth, orgs, meetings, media, chat, users, notifier
     attach,
     onEvent,
     notifyRoom,
+    knock,
     setHooks: (h) => Object.assign(hooks, h),
     kickParticipant,
     endRoom,

@@ -54,6 +54,7 @@ const state = {
   leaving: false,
   spotlight: true,
   lobby: [],
+  requests: [],
   audioCtx: null,
   // In-call chat: mode conversation | meeting | none (see core/meeting-rooms.js).
   chat: { mode: 'none', messages: [], pending: new Map(), unread: 0 },
@@ -548,7 +549,7 @@ function onServer(type, d) {
     case 'signal':
       return onSignal(d.from, d.data);
     case 'lobby.update':
-      return onLobby(d.waiting);
+      return onLobby(d.waiting, d.requests || []);
     case 'error':
       if (d.code === 'room_full') return setEnded('meet.fullTitle', 'meet.fullText', true);
       if (d.reason === 'screenShare') stopScreen();
@@ -1489,24 +1490,36 @@ async function ringMember(uid) {
   }
 }
 
-function onLobby(waiting) {
-  const grew = waiting.length > state.lobby.length;
+// The lobby, and "ask to join" requests from the colleagues' link: an
+// address without an invitation, invited by e-mail from here (the usual
+// invitation and code) or dismissed.
+function onLobby(waiting, requests = state.requests || []) {
+  const grew = waiting.length + requests.length > state.lobby.length + (state.requests?.length || 0);
   state.lobby = waiting;
-  $('#lobby-box').hidden = !waiting.length;
-  $('#lobby-list').innerHTML = waiting
-    .map(
-      (w) => `<li class="lobby-item" data-pid="${esc(w.id)}"><div class="min-w-0"><div class="text-truncate fw-semibold">${esc(w.name)}</div><small class="opacity-75">${esc(w.email)}${w.guest ? ` · ${esc(t('meet.guest'))}` : ''}</small></div>
+  state.requests = requests;
+  const total = waiting.length + requests.length;
+  $('#lobby-box').hidden = !total;
+  $('#lobby-list').innerHTML =
+    waiting
+      .map(
+        (w) => `<li class="lobby-item" data-pid="${esc(w.id)}"><div class="min-w-0"><div class="text-truncate fw-semibold">${esc(w.name)}</div><small class="opacity-75">${esc(w.email)}${w.guest ? ` · ${esc(t('meet.guest'))}` : ''}</small></div>
       <div class="d-flex gap-1"><button class="btn btn-sm btn-success" data-admit="1">${esc(t('meet.admit'))}</button><button class="btn btn-sm btn-outline-light" data-admit="0">${esc(t('meet.deny'))}</button></div></li>`
-    )
-    .join('');
+      )
+      .join('') +
+    requests
+      .map(
+        (k) => `<li class="lobby-item" data-kid="${esc(k.id)}"><div class="min-w-0"><div class="text-truncate fw-semibold">${esc(k.name || k.email)}</div><small class="opacity-75">${esc(k.email)} · ${esc(t('meet.asksToJoin'))}</small></div>
+      <div class="d-flex gap-1"><button class="btn btn-sm btn-success" data-knock="invite">${esc(t('meet.knockInvite'))}</button><button class="btn btn-sm btn-outline-light" data-knock="dismiss">${esc(t('meet.deny'))}</button></div></li>`
+      )
+      .join('');
   const badge = $('#lobby-badge');
-  badge.hidden = !waiting.length;
-  badge.textContent = waiting.length;
+  badge.hidden = !total;
+  badge.textContent = total;
   if (grew) {
     $('#meet-panel').hidden = false;
     $('#meet-panel').dataset.tab = 'people';
     if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
-      new Notification(t('meet.someoneWaiting'), { body: waiting.at(-1).name, icon: '/favicon.svg' });
+      new Notification(t('meet.someoneWaiting'), { body: (waiting.at(-1)?.name || requests.at(-1)?.email) ?? '', icon: '/favicon.svg' });
     }
   }
 }
@@ -1591,8 +1604,24 @@ function leave() {
 }
 
 root.addEventListener('click', async (e) => {
-  const btn = e.target.closest('[data-action], [data-admit], [data-act]');
+  const btn = e.target.closest('[data-action], [data-admit], [data-act], [data-knock]');
   if (!btn) return;
+  if (btn.dataset.knock) {
+    const id = btn.closest('[data-kid]').dataset.kid;
+    const k = state.requests.find((x) => x.id === id);
+    if (btn.dataset.knock === 'invite' && k) {
+      btn.disabled = true;
+      try {
+        await api(`/api/o/${boot.org.slug}/meetings/${boot.meeting.id}/invitations`, { method: 'POST', body: { email: k.email, name: k.name } });
+        $('#invite-status').textContent = t('meet.inviteSent');
+      } catch (err) {
+        $('#invite-status').textContent = err.message;
+        btn.disabled = false;
+        return;
+      }
+    }
+    return send('knock.dismiss', { id });
+  }
   if (btn.dataset.admit !== undefined) {
     return send('admit', { participant_id: btn.closest('[data-pid]').dataset.pid, accept: btn.dataset.admit === '1' });
   }
