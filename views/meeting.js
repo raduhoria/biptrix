@@ -54,6 +54,10 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
           <div class="col-sm-6"><label class="form-label small" for="sel-mic">${e('client.meet.microphone')}</label><select class="form-select form-select-sm" id="sel-mic" data-device="mic"></select></div>
           <div class="col-sm-6"><label class="form-label small" for="sel-cam">${e('client.meet.camera')}</label><select class="form-select form-select-sm" id="sel-cam" data-device="cam"></select></div>
         </div>
+        <div class="bg-section mb-3" hidden>
+          <div class="form-label small">${e('client.meet.bgTitle')}</div>
+          <div class="bg-list" data-bg-list></div>
+        </div>
         <div class="alert alert-warning small py-2" id="media-error" hidden></div>
         <button class="btn btn-primary btn-lg w-100" data-action="join">${e('client.meet.join')}</button>
         <a class="btn btn-link w-100 mt-1" href="${escapeHtml(backHref)}">${e('common.back')}</a>
@@ -104,6 +108,12 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
         <div class="mic-meter mb-3"><span id="mic-level"></span></div>
         <label class="form-label small" for="set-cam">${e('client.meet.camera')}</label>
         <select class="form-select form-select-sm mb-3" id="set-cam" data-device="cam"></select>
+        <div class="bg-section mb-3" hidden>
+          <div class="form-label small">${e('client.meet.bgTitle')}</div>
+          <div class="bg-list" data-bg-list></div>
+          <div class="small opacity-75 mt-1" id="bg-status" role="status"></div>
+          <input type="file" id="bg-file" accept="image/*" hidden>
+        </div>
         <label class="form-label small" for="set-noise">${e('client.meet.noise')}</label>
         <select class="form-select form-select-sm mb-1" id="set-noise" data-device="noise">
           <option value="ai">${e('client.meet.noiseAi')}</option>

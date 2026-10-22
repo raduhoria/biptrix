@@ -1,3 +1,4 @@
+import { BACKGROUNDS, backgroundSupported, customBackground, processCamera, saveCustomBackground } from './background.js';
 import { createE2ee, e2eeSupported } from './e2ee.js';
 import { $, $$, api, esc, fitViewport, hue, icon, initials, randomId, translator } from './lib.js';
 
@@ -45,7 +46,12 @@ const state = {
   icePolicy: 'all',
   canManage: false,
   screenAllowed: false,
-  local: { audio: null, video: null, screen: null },
+  // video: what goes out — the camera (videoRaw) or, with a background,
+  // the processed track (bgProc, public/js/background.js).
+  local: { audio: null, video: null, videoRaw: null, screen: null },
+  bg: BACKGROUNDS.some((b) => b.id === localStorage.getItem('meet.bg')) ? localStorage.getItem('meet.bg') : 'none',
+  bgProc: null,
+  bgBusy: false,
   mic: localStorage.getItem('meet.mic') !== '0',
   cam: localStorage.getItem('meet.cam') !== '0',
   devices: { mic: localStorage.getItem('meet.micId') || '', cam: localStorage.getItem('meet.camId') || '', spk: localStorage.getItem('meet.spkId') || '' },
@@ -135,11 +141,75 @@ async function capture(kind, constraints) {
 async function startCamera() {
   try {
     const stream = await capture('cam', { width: { ideal: 1280 }, height: { ideal: 720 } });
-    state.local.video = stream.getVideoTracks()[0];
+    state.local.videoRaw = state.local.video = stream.getVideoTracks()[0];
+    if (state.bg !== 'none') await applyBackground();
   } catch (err) {
     state.cam = false;
     showMediaError(err);
   }
+}
+
+// ------------------------------------------------------ virtual background
+// Settings → Background: none, blur, a picture or the user's own (kept on
+// this device). Loaded on first use (a few MB, cached); the outgoing track
+// changes only between none and an effect, otherwise the effect changes in
+// place.
+async function applyBackground() {
+  const raw = state.local.videoRaw;
+  if (!raw) return;
+  if (state.bg === 'none') {
+    state.bgProc?.stop();
+    state.bgProc = null;
+    state.local.video = raw;
+    return;
+  }
+  if (state.bgProc) return state.bgProc.set(state.bg);
+  state.bgBusy = true;
+  renderBackgrounds();
+  try {
+    const proc = await processCamera(raw, state.bg);
+    // The camera was stopped or switched meanwhile, or the choice undone.
+    if (state.local.videoRaw !== raw || state.bg === 'none' || state.bgProc) proc.stop();
+    else {
+      state.bgProc = proc;
+      state.local.video = proc.track;
+      await proc.set(state.bg);
+    }
+  } catch (err) {
+    console.warn('background', err);
+    state.bg = 'none';
+    $('#bg-status').textContent = t('meet.bgFailed');
+  } finally {
+    state.bgBusy = false;
+    renderBackgrounds();
+  }
+}
+
+async function setBackground(id) {
+  state.bg = id;
+  localStorage.setItem('meet.bg', id);
+  $('#bg-status').textContent = '';
+  renderBackgrounds();
+  const before = state.local.video;
+  await applyBackground();
+  if (state.local.video !== before) {
+    pushTrack(SLOT.camera);
+    renderPreview();
+    renderLocalTile();
+  }
+}
+
+function renderBackgrounds() {
+  const custom = customBackground();
+  const html = BACKGROUNDS.filter((b) => b.id !== 'custom' || custom)
+    .map((b) => {
+      const label = t(`meet.bg.${b.id}`);
+      const look = b.thumb ? `<img src="${esc(b.thumb)}" alt="" loading="lazy">` : b.id === 'custom' ? `<img src="${esc(custom)}" alt="">` : b.blur ? `<span class="bg-blur" data-strength="${b.blur > 10 ? 'strong' : 'light'}"><img src="/img/backgrounds/home-thumb.jpg" alt="">${icon('user')}</span>` : icon('x');
+      return `<button type="button" class="bg-opt${state.bg === b.id ? ' active' : ''}${state.bg === b.id && state.bgBusy ? ' busy' : ''}" data-bg="${esc(b.id)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${state.bg === b.id}">${look}</button>`;
+    })
+    .join('');
+  const upload = `<button type="button" class="bg-opt bg-upload" data-bg-upload title="${esc(t('meet.bgUpload'))}" aria-label="${esc(t('meet.bgUpload'))}">${icon('plus')}</button>`;
+  for (const box of $$('[data-bg-list]')) box.innerHTML = html + upload;
 }
 
 async function startMic() {
@@ -218,6 +288,12 @@ function showMediaError(err) {
 function stopTrack(kind) {
   state.local[kind]?.stop();
   state.local[kind] = null;
+  if (kind === 'video') {
+    state.bgProc?.stop();
+    state.bgProc = null;
+    state.local.videoRaw?.stop();
+    state.local.videoRaw = null;
+  }
   if (kind === 'audio') {
     stopNoise();
     state.local.audioRaw?.stop();
@@ -1604,6 +1680,11 @@ function leave() {
 }
 
 root.addEventListener('click', async (e) => {
+  const bgBtn = e.target.closest('[data-bg], [data-bg-upload]');
+  if (bgBtn) {
+    if (bgBtn.dataset.bg) return setBackground(bgBtn.dataset.bg);
+    return $('#bg-file').click();
+  }
   const btn = e.target.closest('[data-action], [data-admit], [data-act], [data-knock]');
   if (!btn) return;
   if (btn.dataset.knock) {
@@ -1713,6 +1794,21 @@ $('#invite-form')?.addEventListener('submit', async (e) => {
 });
 
 $('#set-noise').value = state.noise;
+$('#bg-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    await saveCustomBackground(file);
+  } catch {
+    $('#bg-status').textContent = t('meet.bgFailed');
+    return;
+  }
+  if (state.bg === 'custom' && state.bgProc) await state.bgProc.set('custom');
+  await setBackground('custom');
+});
+for (const box of $$('.bg-section')) box.hidden = !backgroundSupported();
+renderBackgrounds();
 for (const sel of $$('[data-device]')) sel.addEventListener('change', (e) => changeDevice(e.target.dataset.device, e.target.value));
 // A headset plugged in or removed mid-call shows up in the lists.
 navigator.mediaDevices?.addEventListener?.('devicechange', () => listDevices().catch(() => {}));
