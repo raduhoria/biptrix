@@ -43,6 +43,29 @@ describe('meetings and external guests', () => {
     return { g, token };
   }
 
+  test("the colleagues' link explains itself to someone outside the organization", async () => {
+    const meeting = await createMeeting([]);
+    const url = `/o/${org.slug}/meet/${meeting.id}`;
+    // Not signed in: sign in, or the e-mailed invitation — not the title.
+    const anon = await client(app.base).get(url);
+    assert.equal(anon.status, 200);
+    assert.match(anon.text, /\/login\?next=/);
+    assert.match(anon.text, /Gama Group/);
+    assert.ok(!anon.text.includes('Ofertă'));
+    // Signed in elsewhere: told so, with a way to switch accounts.
+    const other = await app.org('Alt Grup');
+    await app.user(other, { email: 'cineva@alt.ro', name: 'Cineva' });
+    const outsider = client(app.base);
+    await outsider.login('cineva@alt.ro');
+    const res = await outsider.get(url);
+    assert.equal(res.status, 403);
+    assert.match(res.text, /cineva@alt\.ro/);
+    assert.match(res.text, /action="\/logout"/);
+    // A member still gets the room; an unknown meeting still asks to sign in.
+    assert.equal((await hostClient.get(url)).status, 200);
+    assert.equal((await client(app.base).get(`/o/${org.slug}/meet/nope`)).status, 303);
+  });
+
   test('guest joins after OTP and lobby admission (criterion 18)', async () => {
     const meeting = await createMeeting();
     const { g } = await verifiedGuest();

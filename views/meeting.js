@@ -155,6 +155,31 @@ export function meetingRoomView({ t, meeting, org, mode, displayName = '', canIn
   });
 }
 
+// The colleagues' link (/o/:org/meet/:id) opened by someone who is not in
+// the organization (or not signed in): who signs in, and that a guest comes
+// in through their own e-mailed invitation, not this link. The meeting's
+// title is not shown.
+export function meetingGateView({ t, org, user, next }) {
+  const e = (key, params) => escapeHtml(t(key, params));
+  const login = `/login?next=${encodeURIComponent(next)}`;
+  const body = `<div class="guest-meeting mb-4">
+    ${icon('video', 'guest-ic')}
+    <div><div class="fw-semibold">${e('guest.gateTitle')}</div>
+    <div class="small text-body-secondary">${e('guest.hostedBy', { org: org.name })}</div></div>
+  </div>
+  ${user ? `<div class="alert alert-warning small">${e('guest.gateWrongAccount', { email: user.email, org: org.name })}</div>` : ''}
+  <h2 class="h6">${e('guest.gateMemberTitle', { org: org.name })}</h2>
+  <p class="small text-body-secondary mb-2">${e('guest.gateMemberText')}</p>
+  ${
+    user
+      ? `<form method="post" action="/logout" class="mb-4"><input type="hidden" name="next" value="${escapeHtml(login)}"><button class="btn btn-primary w-100">${e('guest.gateOtherAccount')}</button></form>`
+      : `<a class="btn btn-primary w-100 mb-4" href="${escapeHtml(login)}">${e('guest.gateSignIn')}</a>`
+  }
+  <h2 class="h6">${e('guest.gateGuestTitle')}</h2>
+  <p class="small mb-0">${e('guest.gateGuestText')}</p>`;
+  return authPage({ t, title: t('guest.gateTitle'), path: next, body });
+}
+
 // External guest: the invitation link, then the e-mail code (spec §9).
 export function guestJoinView({ t, token, inv, meeting, org, step, error = '', notice = '' }) {
   const e = (key, params) => escapeHtml(t(key, params));
