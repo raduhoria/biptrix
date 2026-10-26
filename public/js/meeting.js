@@ -93,6 +93,28 @@ function secure(tr, kind) {
   e2ee.attach(tr.receiver, kind, 'recv');
 }
 
+// A peer's description without lines for codecs it does not offer: Firefox,
+// after setCodecPreferences (VP8 above), keeps a=rtcp-fb lines for the
+// codecs it dropped, and Chrome then refuses the whole description
+// ("Failed to parse codecs correctly") — a Firefox–Chrome call never
+// connected.
+function cleanSdp(desc) {
+  if (!desc?.sdp) return desc;
+  let types = null;
+  const sdp = desc.sdp
+    .split('\r\n')
+    .filter((line) => {
+      if (line.startsWith('m=')) {
+        types = new Set(line.split(' ').slice(3));
+        return true;
+      }
+      const pt = /^a=(?:rtcp-fb|fmtp|rtpmap):(\d+)\s/.exec(line)?.[1];
+      return !pt || !types || types.has(pt);
+    })
+    .join('\r\n');
+  return { type: desc.type, sdp };
+}
+
 // The participants e2ee exchanges keys with: synced once per task, so a
 // peer rebuilt (removed and added back at once) is not a change.
 let e2eeSyncQueued = false;
@@ -1065,7 +1087,7 @@ async function onSignal(from, data) {
     if (data.sdp) {
       if (data.sdp.type === 'offer') {
         if (!peer.pc) createPc(peer);
-        await peer.pc.setRemoteDescription(data.sdp);
+        await peer.pc.setRemoteDescription(cleanSdp(data.sdp));
         // The offer created our three transceivers; attach local tracks.
         peer.pc.getTransceivers().forEach((tr, i) => {
           secure(tr, i === SLOT.audio ? 'audio' : 'video');
@@ -1076,7 +1098,7 @@ async function onSignal(from, data) {
         send('signal', { to: from, data: { sdp: peer.pc.localDescription } });
         capPeer(peer);
       } else if (peer.pc) {
-        await peer.pc.setRemoteDescription(data.sdp);
+        await peer.pc.setRemoteDescription(cleanSdp(data.sdp));
       }
       for (const c of peer.pendingIce.splice(0)) await peer.pc.addIceCandidate(c).catch(() => {});
     } else if (data.candidate) {
