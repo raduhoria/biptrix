@@ -262,12 +262,23 @@ async function noiseFilter(raw) {
   stopNoise();
   if (state.noise !== 'ai' || !window.AudioWorkletNode) return raw;
   try {
-    const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    // 48 kHz, RNNoise's rate. Firefox refuses a microphone of another rate
+    // in it: there the context takes the microphone's rate and the worklet
+    // resamples.
+    let ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    let source;
+    try {
+      source = ctx.createMediaStreamSource(new MediaStream([raw]));
+    } catch {
+      ctx.close().catch(() => {});
+      ctx = new AudioContext({ latencyHint: 'interactive' });
+      source = ctx.createMediaStreamSource(new MediaStream([raw]));
+    }
     noiseWasm ||= await (await fetch('/vendor/rnnoise/rnnoise.wasm')).arrayBuffer();
     await ctx.audioWorklet.addModule('/js/noise-worklet.js');
-    const node = new AudioWorkletNode(ctx, 'rnnoise', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit', processorOptions: { wasm: noiseWasm } });
+    const node = new AudioWorkletNode(ctx, 'rnnoise', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: 1, channelCountMode: 'explicit', processorOptions: { wasm: noiseWasm, rate: ctx.sampleRate } });
     const dest = ctx.createMediaStreamDestination();
-    ctx.createMediaStreamSource(new MediaStream([raw])).connect(node).connect(dest);
+    source.connect(node).connect(dest);
     const track = dest.stream.getAudioTracks()[0];
     noiseChain = {
       ctx,
