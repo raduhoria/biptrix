@@ -12,7 +12,7 @@ in the app window. No app store, no native code.
 
 ## Principles
 
-- Node.js ≥ 22.13, ESM, no TypeScript, no build step.
+- Node.js 24 LTS, ESM, no TypeScript, no build step.
 - One dependency: `ws`. Everything else uses Node built-ins: `node:http` with
   our own router, `node:sqlite`, `node:crypto` (scrypt, AES-GCM, TOTP),
   and an SMTP client on `node:net`/`node:tls`.
