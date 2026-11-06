@@ -4,6 +4,7 @@
   "description": "Multi-tenant chat and meetings platform (DM, groups, Spaces, WebRTC meetings with external guests)",
   "type": "module",
   "private": true,
+  "license": "MIT",
   "engines": {
     "node": ">=24"
   },

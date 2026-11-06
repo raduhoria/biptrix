@@ -194,3 +194,7 @@ parameter (consistent hash).
 - F5: cross-node presence and typing, rqlite load tests, billing.
 - P1/P2: SSO (OIDC/SAML), external calendar, recordings, native apps.
 - Backup: a backup script (database, files, secret, with a restore check); rqlite deployments use rqlite's own backups.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
